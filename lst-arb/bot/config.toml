@@ -1,9 +1,9 @@
 # LST/LRT Arbitrage Bot Configuration
 
 [rpc]
-primary = "wss://eth-mainnet.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
-backup1 = "wss://eth-mainnet.ws.alchemyapi.io/v2/u_ybzLz2H0iPFztCKrLN1"
-backup2 = "wss://mainnet.infura.io/ws/v3/YOUR_INFURA_KEY"
+primary = "wss://eth-sepolia.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
+backup1 = "wss://eth-sepolia.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
+backup2 = "wss://sepolia.infura.io/ws/v3/YOUR_INFURA_KEY"
 health_check_interval_ms = 5000
 max_latency_ms = 100
 
