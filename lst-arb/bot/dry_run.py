@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-LST/LRT Arbitrage Scanner - Phase 1: Expanded Surveillance
+LST/LRT Arbitrage Scanner - Phase 1: 0x API Integration
 Monitors LST/LRT tokens using 0x API for cross-DEX quotes.
 """
 
-import json
 import time
 import requests
 from datetime import datetime
@@ -19,14 +18,13 @@ RPC_URL = "https://eth-mainnet.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
 
 # 0x API Configuration
 ZERO_EX_API_KEY = "c09b957e-9f63-4147-9f20-1fcf992eeb6c"
-ZERO_EX_API_URL = "https://api.0x.org/swap/v1"  # Main endpoint for Ethereum mainnet
+ZERO_EX_API_URL = "https://api.0x.org/swap/v1"
 
 # User-Agent to bypass Cloudflare bot detection
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # Tokens
 WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"  # Native ETH placeholder
 TOKENS = {
     "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
     "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
@@ -45,9 +43,6 @@ TOKENS = {
 MIN_SPREAD_BPS = 5
 TRADE_SIZES_ETH = [1, 5, 10, 25]
 GAS_COST_ETH = 0.003
-
-# DEX sources to check (0x aggregates these)
-DEX_SOURCES = ["Uniswap_V3", "Balancer_V2", "Curve", "Maverick_V2", "SushiSwap"]
 
 
 # =============================================================================
@@ -78,126 +73,25 @@ class Opportunity:
 
 
 # =============================================================================
-# RPC HELPERS
-# =============================================================================
-
-def eth_call(to: str, data: str) -> Optional[str]:
-    """Make eth_call to RPC"""
-    try:
-        resp = requests.post(RPC_URL, json={
-            "jsonrpc": "2.0",
-            "method": "eth_call",
-            "params": [{"to": to, "data": data}, "latest"],
-            "id": 1
-        }, timeout=10)
-        result = resp.json().get("result")
-        if result and result != "0x":
-            return result
-    except Exception as e:
-        pass
-    return None
-
-
-def hex_to_int(hex_str: str) -> int:
-    """Convert hex string to int"""
-    if hex_str.startswith("0x"):
-        hex_str = hex_str[2:]
-    return int(hex_str, 16) if hex_str else 0
-
-
-# =============================================================================
-# 0x API QUOTES (CORRECTED)
-# =============================================================================
-
-def get_0x_price(token_addr: str, amount_eth: float, direction: str) -> Optional[float]:
-    """
-    Get normalized price (ETH per Token) from 0x API.
-
-    direction:
-      "buy"  = ETH -> Token (Ask Price - we sell ETH to buy token)
-      "sell" = Token -> ETH (Bid Price - we sell token to get ETH)
-
-    Returns float price in ETH per token, or None if failure.
-    """
-    # Use main 0x API endpoint for Ethereum mainnet
-    base_url = f"{ZERO_EX_API_URL}/price"
-
-    headers = {
-        "0x-api-key": ZERO_EX_API_KEY,
-        "Accept": "application/json",
-        # CRITICAL: User-Agent prevents Cloudflare Exit Code 56 Connection Reset
-        "User-Agent": USER_AGENT,
-    }
-
-    try:
-        if direction == "buy":
-            # We are Selling ETH to Buy Token
-            params = {
-                "sellToken": "WETH",
-                "buyToken": token_addr,
-                "sellAmount": str(int(amount_eth * 1e18)),  # Amount of ETH we give
-            }
-        else:
-            # We are Selling Token to Buy ETH
-            # Use same ETH amount as proxy for token value query
-            params = {
-                "sellToken": token_addr,
-                "buyToken": "WETH",
-                "sellAmount": str(int(amount_eth * 1e18)),  # Proxy amount
-            }
-
-        response = requests.get(base_url, params=params, headers=headers, timeout=10)
-
-        if response.status_code != 200:
-            error_text = response.text[:100] if response.text else f"HTTP {response.status_code}"
-            print(f"    [!] 0x API Error {response.status_code}: {error_text}")
-            return None
-
-        data = response.json()
-
-        # Calculate implied price (ETH per Token)
-        buy_amt = float(data.get("buyAmount", 0))
-        sell_amt = float(data.get("sellAmount", 0))
-
-        if buy_amt <= 0 or sell_amt <= 0:
-            return None
-
-        if direction == "buy":
-            # We sold ETH (sell_amt), got Token (buy_amt)
-            # Price = ETH spent / Tokens received
-            return sell_amt / buy_amt
-        else:
-            # We sold Token (sell_amt), got ETH (buy_amt)
-            # Price = ETH received / Tokens sold
-            return buy_amt / sell_amt
-
-    except requests.exceptions.RequestException as e:
-        print(f"    [!] 0x Request Failed: {str(e)[:60]}")
-        return None
-    except Exception as e:
-        print(f"    [!] 0x Parse Error: {str(e)[:60]}")
-        return None
-
-
-# =============================================================================
-# CURVE QUOTES (Reference)
+# 0x API FUNCTIONS
 # =============================================================================
 
 def get_0x_headers() -> dict:
     """Get headers for 0x API requests"""
     return {
-        "0x-api-key": ZEROX_API_KEY,
+        "0x-api-key": ZERO_EX_API_KEY,
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
     }
 
 
-def get_0x_price(sell_token: str, buy_token: str, sell_amount_wei: int) -> Optional[dict]:
+def get_0x_quote(sell_token: str, buy_token: str, sell_amount_wei: int) -> Optional[dict]:
     """
-    Get price quote from 0x API
-    Returns full response including price, sources, and gas estimate
+    Get price quote from 0x API.
+    Returns full response including price, sources, and gas estimate.
     """
     try:
-        url = f"{ZEROX_API_URL}/price"
+        url = f"{ZERO_EX_API_URL}/price"
         params = {
             "sellToken": sell_token,
             "buyToken": buy_token,
@@ -217,8 +111,15 @@ def get_0x_price(sell_token: str, buy_token: str, sell_amount_wei: int) -> Optio
 
 def get_token_quote(token_name: str, token_addr: str, amount_eth: float, direction: str) -> Optional[Tuple[float, str, float]]:
     """
-    Get quote for a token using 0x API
-    Returns: (price_eth_per_token, primary_source, gas_estimate_eth)
+    Get quote for a token using 0x API.
+
+    Args:
+        token_name: Name of the token (for logging)
+        token_addr: Token contract address
+        amount_eth: Amount to trade in ETH
+        direction: "buy" (ETH -> Token) or "sell" (Token -> ETH)
+
+    Returns: (price_eth_per_token, primary_source, gas_estimate_eth) or None
     """
     amount_wei = int(amount_eth * 1e18)
 
@@ -229,7 +130,7 @@ def get_token_quote(token_name: str, token_addr: str, amount_eth: float, directi
         sell_token = token_addr
         buy_token = WETH
 
-    data = get_0x_price(sell_token, buy_token, amount_wei)
+    data = get_0x_quote(sell_token, buy_token, amount_wei)
 
     if data and "buyAmount" in data:
         buy_amount = int(data["buyAmount"]) / 1e18
@@ -239,7 +140,7 @@ def get_token_quote(token_name: str, token_addr: str, amount_eth: float, directi
             if direction == "buy":
                 price = amount_eth / buy_amount  # ETH spent / tokens received
             else:
-                price = buy_amount / amount_eth  # ETH received / tokens sold (normalized)
+                price = buy_amount / amount_eth  # ETH received / tokens sold
 
             # Get primary liquidity source
             sources = data.get("sources", [])
@@ -263,39 +164,25 @@ def get_token_quote(token_name: str, token_addr: str, amount_eth: float, directi
 # MAIN SCANNER
 # =============================================================================
 
-def scan_all_pools(amount_eth: float = 5) -> List[PoolQuote]:
-    """Scan all configured pools for prices using 0x API"""
+def scan_all_tokens(amount_eth: float = 5) -> List[PoolQuote]:
+    """Scan all configured tokens for prices using 0x API"""
     quotes = []
 
-    # --- 0x API (All tokens) ---
     print("\n  Fetching 0x API quotes for all tokens...")
+
     for token_name, token_addr in TOKENS.items():
-        print(f"    Scanning {token_name}...", end="", flush=True)
+        print(f"    {token_name}:", end=" ", flush=True)
 
-        buy_price = get_0x_price(token_addr, amount_eth, "buy")
-        sell_price = get_0x_price(token_addr, amount_eth, "sell")
+        # Get buy quote (ETH -> Token)
+        buy_result = get_token_quote(token_name, token_addr, amount_eth, "buy")
 
-        if buy_price and sell_price:
-            quotes.append(PoolQuote(
-                dex="0x",
-                pool_name=f"{token_name}-WETH",
-                token=token_name,
-                buy_price=buy_price,
-                sell_price=sell_price,
-                liquidity_ok=True
-            ))
-            print(f" Buy: {buy_price:.6f} | Sell: {sell_price:.6f} ETH")
-        else:
-            print(" FAILED")
+        # Get sell quote (Token -> ETH)
+        sell_result = get_token_quote(token_name, token_addr, amount_eth, "sell")
 
-        time.sleep(0.2)  # Rate limiting for 0x API
+        if buy_result and sell_result:
+            buy_price, buy_source, _ = buy_result
+            sell_price, sell_source, _ = sell_result
 
-    # --- Curve (stETH reference for comparison) ---
-    for pool_name, pool_addr in CURVE_POOLS.items():
-        token = pool_name.split("-")[0]
-        buy = get_curve_quote(pool_addr, amount_eth, "buy")
-        sell = get_curve_quote(pool_addr, amount_eth, "sell")
-        if buy and sell:
             quotes.append(PoolQuote(
                 dex=f"0x({buy_source})",
                 pool_name=f"{token_name}-WETH",
@@ -304,11 +191,11 @@ def scan_all_pools(amount_eth: float = 5) -> List[PoolQuote]:
                 sell_price=sell_price,
                 liquidity_ok=True
             ))
-            print(f"    {token_name}: buy={buy_price:.6f} via {buy_source}, sell={sell_price:.6f} via {sell_source}")
+            print(f"buy={buy_price:.6f} via {buy_source}, sell={sell_price:.6f} via {sell_source}")
         else:
-            print(f"    {token_name}: No quotes available")
+            print("No quotes available")
 
-        # Small delay to avoid rate limiting
+        # Rate limiting
         time.sleep(0.2)
 
     return quotes
@@ -367,16 +254,12 @@ def find_arbitrage(quotes: List[PoolQuote], trade_size: float) -> List[Opportuni
 
 def print_header():
     print("\n" + "=" * 75)
-    print("  LST/LRT ARBITRAGE SCANNER - PHASE 1: 0x API INTEGRATION")
+    print("  LST/LRT ARBITRAGE SCANNER - 0x API INTEGRATION")
     print("=" * 75)
-    print("  Data Sources:")
-    print("    0x API:    ALL LST/LRT tokens (aggregated DEX quotes)")
-    print("    Maverick:  ETH-swETH, ETH-wstETH (Boosted)")
-    print("    Balancer:  ezETH-WETH, rETH-WETH (Weighted)")
-    print("    UniswapV3: ezETH-WETH (0.01%, 0.05% tiers)")
-    print("    Curve:     stETH-ETH (reference)")
+    print("  Data Source: 0x Protocol (DEX Aggregator)")
+    print("  Aggregates: Uniswap V3, Balancer, Curve, Maverick, SushiSwap, etc.")
     print("=" * 75)
-    print("  Tokens via 0x API:")
+    print("  Tokens:")
     print(f"    {', '.join(TOKENS.keys())}")
     print("=" * 75)
     print(f"  Min Spread: {MIN_SPREAD_BPS} bps | Gas Est: {GAS_COST_ETH} ETH")
@@ -386,12 +269,12 @@ def print_header():
 def print_quotes(quotes: List[PoolQuote]):
     print("\n  POOL QUOTES:")
     print("  " + "-" * 70)
-    print(f"  {'DEX':<10} {'Pool':<20} {'Token':<8} {'Buy':<12} {'Sell':<12} {'Spread':<10}")
+    print(f"  {'DEX':<18} {'Pool':<15} {'Token':<8} {'Buy':<12} {'Sell':<12} {'Spread':<10}")
     print("  " + "-" * 70)
 
     for q in quotes:
         spread = (q.sell_price - q.buy_price) / q.buy_price * 10000
-        print(f"  {q.dex:<10} {q.pool_name:<20} {q.token:<8} {q.buy_price:<12.6f} {q.sell_price:<12.6f} {spread:>+8.1f} bps")
+        print(f"  {q.dex:<18} {q.pool_name:<15} {q.token:<8} {q.buy_price:<12.6f} {q.sell_price:<12.6f} {spread:>+8.1f} bps")
 
 
 def print_opportunities(opps: List[Opportunity]):
@@ -406,7 +289,7 @@ def print_opportunities(opps: List[Opportunity]):
         color = "\033[92m" if opp.net_profit_eth > 0 else "\033[93m"
         reset = "\033[0m"
 
-        print(f"\n{color}  [{i}] {opp.token}: {opp.buy_dex}/{opp.buy_pool} → {opp.sell_dex}/{opp.sell_pool}{reset}")
+        print(f"\n{color}  [{i}] {opp.token}: {opp.buy_dex}/{opp.buy_pool} -> {opp.sell_dex}/{opp.sell_pool}{reset}")
         print(f"      Spread: {opp.spread_bps:.1f} bps | Size: {opp.trade_size_eth} ETH")
         print(f"      Gross: {opp.gross_profit_eth:+.6f} ETH | Net: {opp.net_profit_eth:+.6f} ETH (${opp.net_profit_eth * 3100:+.2f})")
 
@@ -448,7 +331,7 @@ def run_scanner():
                         stats["profitable"] += 1
                         stats["total_profit"] += opp.net_profit_eth
             else:
-                print("\n  No quotes retrieved. Check RPC connection.")
+                print("\n  No quotes retrieved. Check API connection.")
 
             print(f"\n{'─' * 75}")
             print(f"  SESSION: {stats['opps']} opps | {stats['profitable']} profitable | {stats['total_profit']:.4f} ETH")
