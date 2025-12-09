@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LST/LRT Arbitrage Bot</title>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #131a2a;
+            --bg-card: #1a2332;
+            --border: #2a3548;
+            --text-primary: #e4e8ef;
+            --text-secondary: #8892a4;
+            --accent-green: #00d4aa;
+            --accent-red: #ff4757;
+            --accent-blue: #4da3ff;
+            --accent-yellow: #ffc107;
+            --accent-purple: #a855f7;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 30px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--accent-green), var(--accent-blue));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 18px;
+        }
+
+        .logo h1 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .logo span {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .network-badge {
+            background: var(--bg-card);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            border: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .network-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-yellow);
+        }
+
+        .btn {
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            font-family: inherit;
+        }
+
+        .btn-start {
+            background: var(--accent-green);
+            color: #000;
+        }
+
+        .btn-start:hover {
+            filter: brightness(1.1);
+            transform: translateY(-1px);
+        }
+
+        .btn-stop {
+            background: var(--accent-red);
+            color: #fff;
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .stat-value.positive {
+            color: var(--accent-green);
+        }
+
+        .stat-value.negative {
+            color: var(--accent-red);
+        }
+
+        .stat-sub {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        /* Main Grid */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 1000px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .panel-body {
+            padding: 20px;
+        }
+
+        /* Opportunities Table */
+        .opp-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .opp-table th,
+        .opp-table td {
+            padding: 12px 8px;
+            text-align: left;
+            font-size: 13px;
+        }
+
+        .opp-table th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .opp-table tr {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .opp-table tr:last-child {
+            border-bottom: none;
+        }
+
+        .token-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-secondary);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-weight: 600;
+        }
+
+        .token-icon {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+        }
+
+        .spread-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .spread-badge.profitable {
+            background: rgba(0, 212, 170, 0.15);
+            color: var(--accent-green);
+        }
+
+        .spread-badge.unprofitable {
+            background: rgba(136, 146, 164, 0.15);
+            color: var(--text-secondary);
+        }
+
+        .price-cell {
+            font-family: 'SF Mono', monospace;
+        }
+
+        .price-na {
+            color: var(--text-secondary);
+        }
+
+        /* Trades List */
+        .trade-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .trade-item:last-child {
+            border-bottom: none;
+        }
+
+        .trade-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .trade-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .trade-icon.success {
+            background: rgba(0, 212, 170, 0.15);
+        }
+
+        .trade-icon.failed {
+            background: rgba(255, 71, 87, 0.15);
+        }
+
+        .trade-details h4 {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .trade-details span {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .trade-profit {
+            text-align: right;
+        }
+
+        .trade-profit .amount {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .trade-profit .amount.positive {
+            color: var(--accent-green);
+        }
+
+        .trade-profit .amount.negative {
+            color: var(--accent-red);
+        }
+
+        .trade-profit .time {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        /* Status Indicator */
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.running {
+            background: var(--accent-green);
+        }
+
+        .status-dot.stopped {
+            background: var(--accent-red);
+            animation: none;
+        }
+
+        .status-dot.idle {
+            background: var(--accent-yellow);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* RPC Status */
+        .rpc-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .rpc-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+        }
+
+        .rpc-name {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .rpc-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .rpc-dot.connected {
+            background: var(--accent-green);
+        }
+
+        .rpc-dot.error {
+            background: var(--accent-red);
+        }
+
+        .rpc-dot.disconnected {
+            background: var(--text-secondary);
+        }
+
+        .rpc-latency {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        /* Wallet Info */
+        .wallet-info {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .wallet-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .wallet-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .wallet-label {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .wallet-value {
+            font-family: 'SF Mono', monospace;
+            font-size: 12px;
+        }
+
+        .wallet-value a {
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+
+        .wallet-value a:hover {
+            text-decoration: underline;
+        }
+
+        /* Footer */
+        footer {
+            margin-top: 40px;
+            padding: 20px 0;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        /* Live indicator */
+        .live-badge {
+            background: rgba(0, 212, 170, 0.15);
+            color: var(--accent-green);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .live-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            background: var(--accent-green);
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        /* Full width panel */
+        .full-width {
+            grid-column: 1 / -1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">A</div>
+                <div>
+                    <h1>LST Arbitrage Bot</h1>
+                    <span>Flash Loan Arbitrage Monitor</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="network-badge">
+                    <div class="network-dot"></div>
+                    <span id="network-name">Sepolia Testnet</span>
+                </div>
+                <div class="status-indicator">
+                    <div class="status-dot idle" id="status-dot"></div>
+                    <span id="status-text">Idle</span>
+                </div>
+                <button class="btn btn-start" id="control-btn" onclick="toggleBot()">Start Bot</button>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Net Profit</div>
+                <div class="stat-value positive" id="net-profit">0.000 ETH</div>
+                <div class="stat-sub">Gross: <span id="gross-profit">0.000</span> | Gas: <span id="gas-spent">0.000</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value" id="win-rate">0%</div>
+                <div class="stat-sub"><span id="txs-confirmed">0</span> confirmed / <span id="txs-reverted">0</span> reverted</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Opportunities</div>
+                <div class="stat-value" id="opportunities">0</div>
+                <div class="stat-sub"><span id="simulations">0</span> simulations passed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Wallet Balance</div>
+                <div class="stat-value" id="wallet-balance">0.000 ETH</div>
+                <div class="stat-sub">Gas Price: <span id="gas-price">0</span> gwei</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-value" id="uptime">00:00:00</div>
+                <div class="stat-sub">Block: <span id="block-number">0</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">RPC Latency</div>
+                <div class="stat-value" id="rpc-latency">0 ms</div>
+                <div class="stat-sub">Primary endpoint</div>
+            </div>
+        </div>
+
+        <!-- Main Grid -->
+        <div class="main-grid">
+            <!-- Opportunities Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span>Price Spreads</span>
+                    </div>
+                    <div class="live-badge">LIVE</div>
+                </div>
+                <div class="panel-body" style="padding: 0;">
+                    <table class="opp-table">
+                        <thead>
+                            <tr>
+                                <th>Token</th>
+                                <th>Curve</th>
+                                <th>Uniswap</th>
+                                <th>Balancer</th>
+                                <th>Spread</th>
+                            </tr>
+                        </thead>
+                        <tbody id="opportunities-table">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Recent Trades Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span>Recent Trades</span>
+                    </div>
+                    <span style="color: var(--text-secondary); font-size: 12px;">Last 24h</span>
+                </div>
+                <div class="panel-body" id="trades-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <!-- RPC Status Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span>RPC Endpoints</span>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="rpc-list" id="rpc-list">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Wallet Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span>Contract Info</span>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="wallet-info">
+                        <div class="wallet-row">
+                            <span class="wallet-label">Wallet</span>
+                            <span class="wallet-value">
+                                <a href="#" id="wallet-link" target="_blank">Loading...</a>
+                            </span>
+                        </div>
+                        <div class="wallet-row">
+                            <span class="wallet-label">Contract</span>
+                            <span class="wallet-value">
+                                <a href="#" id="contract-link" target="_blank">Loading...</a>
+                            </span>
+                        </div>
+                        <div class="wallet-row">
+                            <span class="wallet-label">Network</span>
+                            <span class="wallet-value" id="chain-info">Sepolia (11155111)</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            LST/LRT Arbitrage Bot v1.0 | Flash Loans powered by Balancer (0% fee)
+        </footer>
+    </div>
+
+    <script>
+        let botRunning = false;
+        let uptimeSeconds = 0;
+        let uptimeInterval = null;
+
+        // Format ETH values
+        function formatEth(value) {
+            return parseFloat(value).toFixed(4);
+        }
+
+        // Format uptime
+        function formatUptime(seconds) {
+            const hrs = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // Toggle bot
+        async function toggleBot() {
+            const btn = document.getElementById('control-btn');
+            const endpoint = botRunning ? '/api/stop' : '/api/start';
+
+            try {
+                const response = await fetch(endpoint, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    botRunning = !botRunning;
+                    updateBotStatus();
+                }
+            } catch (error) {
+                console.error('Error toggling bot:', error);
+            }
+        }
+
+        // Update bot status UI
+        function updateBotStatus() {
+            const btn = document.getElementById('control-btn');
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+
+            if (botRunning) {
+                btn.textContent = 'Stop Bot';
+                btn.className = 'btn btn-stop';
+                dot.className = 'status-dot running';
+                text.textContent = 'Running';
+
+                if (!uptimeInterval) {
+                    uptimeInterval = setInterval(() => {
+                        uptimeSeconds++;
+                        document.getElementById('uptime').textContent = formatUptime(uptimeSeconds);
+                    }, 1000);
+                }
+            } else {
+                btn.textContent = 'Start Bot';
+                btn.className = 'btn btn-start';
+                dot.className = 'status-dot idle';
+                text.textContent = 'Idle';
+
+                if (uptimeInterval) {
+                    clearInterval(uptimeInterval);
+                    uptimeInterval = null;
+                }
+            }
+        }
+
+        // Fetch and update status
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                document.getElementById('net-profit').textContent = formatEth(data.net_profit_eth) + ' ETH';
+                document.getElementById('gross-profit').textContent = formatEth(data.gross_profit_eth);
+                document.getElementById('gas-spent').textContent = formatEth(data.gas_spent_eth);
+                document.getElementById('win-rate').textContent = data.win_rate + '%';
+                document.getElementById('txs-confirmed').textContent = data.txs_confirmed;
+                document.getElementById('txs-reverted').textContent = data.txs_reverted;
+                document.getElementById('opportunities').textContent = data.opportunities_found;
+                document.getElementById('simulations').textContent = data.simulations_passed;
+
+                botRunning = data.status === 'running';
+                uptimeSeconds = data.uptime_seconds;
+                updateBotStatus();
+
+            } catch (error) {
+                console.error('Error fetching status:', error);
+            }
+        }
+
+        // Fetch and update network info
+        async function updateNetwork() {
+            try {
+                const response = await fetch('/api/network');
+                const data = await response.json();
+
+                document.getElementById('gas-price').textContent = data.gas_price_gwei;
+                document.getElementById('block-number').textContent = data.block_number.toLocaleString();
+                document.getElementById('network-name').textContent = data.chain;
+                document.getElementById('chain-info').textContent = `${data.chain} (${data.chain_id})`;
+
+                // Update RPC latency
+                const primaryRpc = data.rpc_status.primary;
+                document.getElementById('rpc-latency').textContent = primaryRpc.latency_ms + ' ms';
+
+                // Update RPC list
+                const rpcList = document.getElementById('rpc-list');
+                rpcList.innerHTML = `
+                    <div class="rpc-item">
+                        <div class="rpc-name">
+                            <div class="rpc-dot ${primaryRpc.status}"></div>
+                            <span>Primary (Alchemy)</span>
+                        </div>
+                        <span class="rpc-latency">${primaryRpc.latency_ms}ms</span>
+                    </div>
+                    <div class="rpc-item">
+                        <div class="rpc-name">
+                            <div class="rpc-dot ${data.rpc_status.backup1.status}"></div>
+                            <span>Backup 1 (Alchemy)</span>
+                        </div>
+                        <span class="rpc-latency">${data.rpc_status.backup1.latency_ms}ms</span>
+                    </div>
+                    <div class="rpc-item">
+                        <div class="rpc-name">
+                            <div class="rpc-dot ${data.rpc_status.backup2.status}"></div>
+                            <span>Backup 2 (Infura)</span>
+                        </div>
+                        <span class="rpc-latency">-</span>
+                    </div>
+                `;
+
+            } catch (error) {
+                console.error('Error fetching network:', error);
+            }
+        }
+
+        // Fetch and update wallet info
+        async function updateWallet() {
+            try {
+                const response = await fetch('/api/wallet');
+                const data = await response.json();
+
+                document.getElementById('wallet-balance').textContent = formatEth(data.balance_eth) + ' ETH';
+
+                const walletShort = data.address.slice(0, 6) + '...' + data.address.slice(-4);
+                const contractShort = data.contract_address.slice(0, 6) + '...' + data.contract_address.slice(-4);
+
+                const walletLink = document.getElementById('wallet-link');
+                walletLink.href = `https://sepolia.etherscan.io/address/${data.address}`;
+                walletLink.textContent = walletShort;
+
+                const contractLink = document.getElementById('contract-link');
+                contractLink.href = `https://sepolia.etherscan.io/address/${data.contract_address}`;
+                contractLink.textContent = contractShort;
+
+            } catch (error) {
+                console.error('Error fetching wallet:', error);
+            }
+        }
+
+        // Fetch and update opportunities
+        async function updateOpportunities() {
+            try {
+                const response = await fetch('/api/opportunities');
+                const data = await response.json();
+
+                const tbody = document.getElementById('opportunities-table');
+                tbody.innerHTML = data.map(opp => `
+                    <tr>
+                        <td>
+                            <div class="token-badge">
+                                <div class="token-icon"></div>
+                                ${opp.token}
+                            </div>
+                        </td>
+                        <td class="price-cell ${opp.curve_price ? '' : 'price-na'}">
+                            ${opp.curve_price ? opp.curve_price.toFixed(4) : '-'}
+                        </td>
+                        <td class="price-cell">
+                            ${opp.uniswap_price.toFixed(4)}
+                        </td>
+                        <td class="price-cell">
+                            ${opp.balancer_price.toFixed(4)}
+                        </td>
+                        <td>
+                            <span class="spread-badge ${opp.profitable ? 'profitable' : 'unprofitable'}">
+                                ${opp.best_spread_bps} bps
+                            </span>
+                        </td>
+                    </tr>
+                `).join('');
+
+            } catch (error) {
+                console.error('Error fetching opportunities:', error);
+            }
+        }
+
+        // Fetch and update trades
+        async function updateTrades() {
+            try {
+                const response = await fetch('/api/trades');
+                const data = await response.json();
+
+                const tradesList = document.getElementById('trades-list');
+
+                if (data.length === 0) {
+                    tradesList.innerHTML = '<p style="color: var(--text-secondary); text-align: center;">No trades yet</p>';
+                    return;
+                }
+
+                tradesList.innerHTML = data.map(trade => `
+                    <div class="trade-item">
+                        <div class="trade-left">
+                            <div class="trade-icon ${trade.status === 'confirmed' ? 'success' : 'failed'}">
+                                ${trade.status === 'confirmed' ? '✓' : '✗'}
+                            </div>
+                            <div class="trade-details">
+                                <h4>${trade.token}: ${trade.buy_venue} → ${trade.sell_venue}</h4>
+                                <span>${trade.amount_eth} ETH flash loan</span>
+                            </div>
+                        </div>
+                        <div class="trade-profit">
+                            <div class="amount ${trade.profit_eth >= 0 ? 'positive' : 'negative'}">
+                                ${trade.profit_eth >= 0 ? '+' : ''}${formatEth(trade.profit_eth)} ETH
+                            </div>
+                            <div class="time">${trade.timestamp}</div>
+                        </div>
+                    </div>
+                `).join('');
+
+            } catch (error) {
+                console.error('Error fetching trades:', error);
+            }
+        }
+
+        // Initial load and set up polling
+        async function init() {
+            await Promise.all([
+                updateStatus(),
+                updateNetwork(),
+                updateWallet(),
+                updateOpportunities(),
+                updateTrades()
+            ]);
+
+            // Poll every 5 seconds
+            setInterval(updateStatus, 5000);
+            setInterval(updateNetwork, 5000);
+            setInterval(updateWallet, 10000);
+            setInterval(updateOpportunities, 3000);
+            setInterval(updateTrades, 10000);
+        }
+
+        init();
+    </script>
+</body>
+</html>
