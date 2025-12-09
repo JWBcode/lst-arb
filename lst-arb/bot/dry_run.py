@@ -19,7 +19,11 @@ RPC_URL = "https://eth-mainnet.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
 
 # 0x API Configuration
 ZERO_EX_API_KEY = "c09b957e-9f63-4147-9f20-1fcf992eeb6c"
-ZERO_EX_API_URL = "https://api.0x.org/swap/v1"
+ZERO_EX_API_URL = "https://api.0x.org/swap/v1"  # Fallback
+ZERO_EX_ETH_API_URL = "https://ethereum.api.0x.org/swap/v1"  # Preferred (chain-specific)
+
+# User-Agent to bypass Cloudflare bot detection
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # Tokens
 WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
@@ -128,112 +132,77 @@ def hex_to_int(hex_str: str) -> int:
 
 
 # =============================================================================
-# 0x API QUOTES
+# 0x API QUOTES (CORRECTED)
 # =============================================================================
-
-def get_0x_quote(token_addr: str, amount_eth: float, direction: str) -> Optional[Dict]:
-    """
-    Get quote from 0x API for token swap.
-    Returns dict with price and additional metadata.
-
-    direction: "buy" = ETH -> Token, "sell" = Token -> ETH
-    """
-    amount_wei = int(amount_eth * 1e18)
-
-    headers = {
-        "0x-api-key": ZERO_EX_API_KEY,
-        "Accept": "application/json",
-    }
-
-    try:
-        if direction == "buy":  # ETH -> Token (buying token with ETH)
-            params = {
-                "sellToken": "WETH",
-                "buyToken": token_addr,
-                "sellAmount": str(amount_wei),
-            }
-        else:  # Token -> ETH (selling token for ETH)
-            params = {
-                "sellToken": token_addr,
-                "buyToken": "WETH",
-                "sellAmount": str(amount_wei),
-            }
-
-        url = f"{ZERO_EX_API_URL}/quote"
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            return {
-                "buyAmount": int(data.get("buyAmount", 0)),
-                "sellAmount": int(data.get("sellAmount", 0)),
-                "price": float(data.get("price", 0)),
-                "estimatedGas": int(data.get("estimatedGas", 0)),
-                "sources": data.get("sources", []),
-                "guaranteedPrice": float(data.get("guaranteedPrice", 0)),
-            }
-        else:
-            error_msg = resp.json().get("reason", resp.text) if resp.text else f"HTTP {resp.status_code}"
-            print(f"    0x API error for {token_addr[:10]}... ({direction}): {error_msg}")
-            return None
-
-    except Exception as e:
-        print(f"    0x API exception: {str(e)[:50]}")
-        return None
-
 
 def get_0x_price(token_addr: str, amount_eth: float, direction: str) -> Optional[float]:
     """
-    Get price from 0x API (uses /price endpoint for faster response).
-    Returns price as ETH per token.
+    Get normalized price (ETH per Token) from 0x API.
+
+    direction:
+      "buy"  = ETH -> Token (Ask Price - we sell ETH to buy token)
+      "sell" = Token -> ETH (Bid Price - we sell token to get ETH)
+
+    Returns float price in ETH per token, or None if failure.
     """
-    amount_wei = int(amount_eth * 1e18)
+    # Use chain-specific endpoint for better routing stability
+    base_url = f"{ZERO_EX_ETH_API_URL}/price"
 
     headers = {
         "0x-api-key": ZERO_EX_API_KEY,
         "Accept": "application/json",
+        # CRITICAL: User-Agent prevents Cloudflare Exit Code 56 Connection Reset
+        "User-Agent": USER_AGENT,
     }
 
     try:
-        if direction == "buy":  # ETH -> Token
+        if direction == "buy":
+            # We are Selling ETH to Buy Token
             params = {
                 "sellToken": "WETH",
                 "buyToken": token_addr,
-                "sellAmount": str(amount_wei),
+                "sellAmount": str(int(amount_eth * 1e18)),  # Amount of ETH we give
             }
-        else:  # Token -> ETH
+        else:
+            # We are Selling Token to Buy ETH
+            # Use same ETH amount as proxy for token value query
             params = {
                 "sellToken": token_addr,
                 "buyToken": "WETH",
-                "sellAmount": str(amount_wei),
+                "sellAmount": str(int(amount_eth * 1e18)),  # Proxy amount
             }
 
-        url = f"{ZERO_EX_API_URL}/price"
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        response = requests.get(base_url, params=params, headers=headers, timeout=10)
 
-        if resp.status_code == 200:
-            data = resp.json()
-            buy_amount = int(data.get("buyAmount", 0))
-            sell_amount = int(data.get("sellAmount", 0))
-
-            if buy_amount > 0 and sell_amount > 0:
-                if direction == "buy":
-                    # Buying token: price = ETH spent / tokens received
-                    return (sell_amount / 1e18) / (buy_amount / 1e18)
-                else:
-                    # Selling token: price = ETH received / tokens sold
-                    return (buy_amount / 1e18) / (sell_amount / 1e18)
-        else:
-            error_data = resp.json() if resp.text else {}
-            reason = error_data.get("reason", f"HTTP {resp.status_code}")
-            if "validation" not in reason.lower():  # Don't spam validation errors
-                print(f"    0x price error ({direction}): {reason[:60]}")
+        if response.status_code != 200:
+            error_text = response.text[:100] if response.text else f"HTTP {response.status_code}"
+            print(f"    [!] 0x API Error {response.status_code}: {error_text}")
             return None
 
-    except Exception as e:
-        return None
+        data = response.json()
 
-    return None
+        # Calculate implied price (ETH per Token)
+        buy_amt = float(data.get("buyAmount", 0))
+        sell_amt = float(data.get("sellAmount", 0))
+
+        if buy_amt <= 0 or sell_amt <= 0:
+            return None
+
+        if direction == "buy":
+            # We sold ETH (sell_amt), got Token (buy_amt)
+            # Price = ETH spent / Tokens received
+            return sell_amt / buy_amt
+        else:
+            # We sold Token (sell_amt), got ETH (buy_amt)
+            # Price = ETH received / Tokens sold
+            return buy_amt / sell_amt
+
+    except requests.exceptions.RequestException as e:
+        print(f"    [!] 0x Request Failed: {str(e)[:60]}")
+        return None
+    except Exception as e:
+        print(f"    [!] 0x Parse Error: {str(e)[:60]}")
+        return None
 
 
 # =============================================================================
@@ -434,18 +403,25 @@ def scan_all_pools(amount_eth: float = 5) -> List[PoolQuote]:
     # --- 0x API (All tokens) ---
     print("\n  Fetching 0x API quotes for all tokens...")
     for token_name, token_addr in TOKENS.items():
-        buy = get_0x_price(token_addr, amount_eth, "buy")
-        sell = get_0x_price(token_addr, amount_eth, "sell")
-        if buy and sell:
+        print(f"    Scanning {token_name}...", end="", flush=True)
+
+        buy_price = get_0x_price(token_addr, amount_eth, "buy")
+        sell_price = get_0x_price(token_addr, amount_eth, "sell")
+
+        if buy_price and sell_price:
             quotes.append(PoolQuote(
                 dex="0x",
                 pool_name=f"{token_name}-WETH",
                 token=token_name,
-                buy_price=buy,
-                sell_price=sell,
+                buy_price=buy_price,
+                sell_price=sell_price,
                 liquidity_ok=True
             ))
-        time.sleep(0.1)  # Rate limiting for 0x API
+            print(f" Buy: {buy_price:.6f} | Sell: {sell_price:.6f} ETH")
+        else:
+            print(" FAILED")
+
+        time.sleep(0.2)  # Rate limiting for 0x API
 
     # --- Curve (stETH reference for comparison) ---
     for pool_name, pool_addr in CURVE_POOLS.items():
