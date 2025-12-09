@@ -19,8 +19,7 @@ RPC_URL = "https://eth-mainnet.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
 
 # 0x API Configuration
 ZERO_EX_API_KEY = "c09b957e-9f63-4147-9f20-1fcf992eeb6c"
-ZERO_EX_API_URL = "https://api.0x.org/swap/v1"  # Fallback
-ZERO_EX_ETH_API_URL = "https://ethereum.api.0x.org/swap/v1"  # Preferred (chain-specific)
+ZERO_EX_API_URL = "https://api.0x.org/swap/v1"  # Main endpoint for Ethereum mainnet
 
 # User-Agent to bypass Cloudflare bot detection
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -120,8 +119,8 @@ def get_0x_price(token_addr: str, amount_eth: float, direction: str) -> Optional
 
     Returns float price in ETH per token, or None if failure.
     """
-    # Use chain-specific endpoint for better routing stability
-    base_url = f"{ZERO_EX_ETH_API_URL}/price"
+    # Use main 0x API endpoint for Ethereum mainnet
+    base_url = f"{ZERO_EX_API_URL}/price"
 
     headers = {
         "0x-api-key": ZERO_EX_API_KEY,
