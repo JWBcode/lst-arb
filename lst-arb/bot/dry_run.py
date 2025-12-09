@@ -59,10 +59,6 @@ TRADE_SIZES_ETH = [1, 5, 10, 25]  # Test multiple sizes
 GAS_COST_ETH = 0.003  # ~$10 at current prices
 FLASH_LOAN_FEE = 0.0  # Balancer = 0%
 
-# Set to True to simulate volatile market conditions
-SIMULATE_VOLATILITY = True
-VOLATILITY_SPREAD_BPS = 25  # Simulated cross-venue spread during volatility
-
 
 @dataclass
 class Opportunity:
@@ -156,7 +152,6 @@ def get_dex_prices_from_api(token_address: str) -> Dict[str, float]:
 
 def get_all_prices(token_name: str, amount_eth: float = 5) -> Dict[str, Dict[str, float]]:
     """Get prices from all available venues"""
-    import random
     token_info = TOKENS.get(token_name, {})
     prices = {}
 
@@ -171,31 +166,15 @@ def get_all_prices(token_name: str, amount_eth: float = 5) -> Dict[str, Dict[str
     if prices.get("Curve"):
         curve_mid = (prices["Curve"]["buy"] + prices["Curve"]["sell"]) / 2
 
-        if SIMULATE_VOLATILITY:
-            # Simulate volatile market - DEXs can have larger spreads
-            # Random variance to simulate real market conditions
-            uni_offset = random.uniform(-0.003, 0.003)  # +/- 30 bps
-            bal_offset = random.uniform(-0.002, 0.002)  # +/- 20 bps
-
-            prices["Uniswap"] = {
-                "buy": curve_mid * (1 + uni_offset + 0.0001),
-                "sell": curve_mid * (1 + uni_offset - 0.0001),
-            }
-
-            prices["Balancer"] = {
-                "buy": curve_mid * (1 + bal_offset + 0.0001),
-                "sell": curve_mid * (1 + bal_offset - 0.0001),
-            }
-        else:
-            # Stable market - tight spreads (realistic but fewer opps)
-            prices["Uniswap"] = {
-                "buy": curve_mid * 1.0002,
-                "sell": curve_mid * 0.9998,
-            }
-            prices["Balancer"] = {
-                "buy": curve_mid * 1.0001,
-                "sell": curve_mid * 0.9999,
-            }
+        # Simulated DEX prices based on Curve mid price
+        prices["Uniswap"] = {
+            "buy": curve_mid * 1.0002,
+            "sell": curve_mid * 0.9998,
+        }
+        prices["Balancer"] = {
+            "buy": curve_mid * 1.0001,
+            "sell": curve_mid * 0.9999,
+        }
 
     return prices
 
@@ -253,10 +232,6 @@ def find_opportunities(token: str, trade_size_eth: float, prices: Dict) -> List[
 def print_header():
     print("\n" + "=" * 70)
     print("  LST/LRT ARBITRAGE DRY RUN MONITOR")
-    if SIMULATE_VOLATILITY:
-        print("  MODE: SIMULATION (volatile market conditions)")
-    else:
-        print("  MODE: LIVE MONITORING (real market spreads)")
     print("  Watching mainnet prices - NO TRADES EXECUTED")
     print("=" * 70)
     print(f"  Min Spread:     {MIN_SPREAD_BPS} bps ({MIN_SPREAD_BPS/100:.2f}%)")
