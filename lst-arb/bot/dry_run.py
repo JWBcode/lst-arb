@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LST/LRT Arbitrage Scanner - Phase 1: Expanded Surveillance
-Monitors specific pools across Maverick, Balancer, and Uniswap V3.
+Monitors LST/LRT tokens using 0x API for cross-DEX quotes.
 """
 
 import json
@@ -40,40 +40,15 @@ TOKENS = {
 }
 
 # =============================================================================
-# DEX CONTRACTS
+# SCANNER SETTINGS
 # =============================================================================
 
-# Maverick V2
-MAVERICK_QUOTER = "0x9980ce3b5570e41324904f46A06cE7B466925E23"
-MAVERICK_POOLS = {
-    "swETH-ETH": "0x0CE176E1b11A8f88a4Ba2535De80E81F88592bad",   # Boosted
-    "wstETH-ETH": "0x0E4275f93D8B8826A01d4A26f6f4F4F6644d08B5", # Boosted
-}
-
-# Balancer V2
-BALANCER_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
-BALANCER_POOLS = {
-    # Pool ID format: address + pool type + nonce
-    "ezETH-WETH": "0x596192bb6e41802428ac943d2f1476c1af25cc0e000000000000000000000659",
-    "rETH-WETH": "0x1e19cf2d73a72ef1332c882f20534b6519be0276000200000000000000000112",
-}
-
-# Uniswap V3
-UNISWAP_QUOTER = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
-UNISWAP_POOLS = {
-    "ezETH-WETH-100": {"token": "ezETH", "fee": 100},    # 0.01% fee tier
-    "ezETH-WETH-500": {"token": "ezETH", "fee": 500},    # 0.05% fee tier
-}
-
-# Curve (for reference pricing)
-CURVE_POOLS = {
-    "stETH-ETH": "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022",
-}
-
-# Scanner settings
 MIN_SPREAD_BPS = 5
 TRADE_SIZES_ETH = [1, 5, 10, 25]
 GAS_COST_ETH = 0.003
+
+# DEX sources to check (0x aggregates these)
+DEX_SOURCES = ["Uniswap_V3", "Balancer_V2", "Curve", "Maverick_V2", "SushiSwap"]
 
 
 # =============================================================================
@@ -209,186 +184,79 @@ def get_0x_price(token_addr: str, amount_eth: float, direction: str) -> Optional
 # CURVE QUOTES (Reference)
 # =============================================================================
 
-def get_curve_quote(pool: str, amount_eth: float, direction: str) -> Optional[float]:
-    """Get Curve stETH pool price"""
+def get_0x_headers() -> dict:
+    """Get headers for 0x API requests"""
+    return {
+        "0x-api-key": ZEROX_API_KEY,
+        "Accept": "application/json",
+    }
+
+
+def get_0x_price(sell_token: str, buy_token: str, sell_amount_wei: int) -> Optional[dict]:
+    """
+    Get price quote from 0x API
+    Returns full response including price, sources, and gas estimate
+    """
+    try:
+        url = f"{ZEROX_API_URL}/price"
+        params = {
+            "sellToken": sell_token,
+            "buyToken": buy_token,
+            "sellAmount": str(sell_amount_wei),
+        }
+        resp = requests.get(url, params=params, headers=get_0x_headers(), timeout=10)
+
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            print(f"    0x API error: {resp.status_code} - {resp.text[:100]}")
+    except Exception as e:
+        print(f"    0x API exception: {e}")
+
+    return None
+
+
+def get_token_quote(token_name: str, token_addr: str, amount_eth: float, direction: str) -> Optional[Tuple[float, str, float]]:
+    """
+    Get quote for a token using 0x API
+    Returns: (price_eth_per_token, primary_source, gas_estimate_eth)
+    """
     amount_wei = int(amount_eth * 1e18)
 
-    if direction == "buy":  # ETH -> token
-        i, j = 0, 1
-    else:  # token -> ETH
-        i, j = 1, 0
+    if direction == "buy":  # ETH -> Token (selling ETH, buying token)
+        sell_token = WETH
+        buy_token = token_addr
+    else:  # Token -> ETH (selling token, buying ETH)
+        sell_token = token_addr
+        buy_token = WETH
 
-    # get_dy(int128,int128,uint256)
-    data = "0x5e0d443f"
-    data += f"{i:064x}{j:064x}{amount_wei:064x}"
+    data = get_0x_price(sell_token, buy_token, amount_wei)
 
-    result = eth_call(pool, data)
-    if result:
-        amount_out = hex_to_int(result) / 1e18
-        if amount_out > 0:
+    if data and "buyAmount" in data:
+        buy_amount = int(data["buyAmount"]) / 1e18
+
+        if buy_amount > 0:
+            # Calculate price (ETH per token)
             if direction == "buy":
-                return amount_eth / amount_out
+                price = amount_eth / buy_amount  # ETH spent / tokens received
             else:
-                return amount_out / amount_eth
-    return None
+                price = buy_amount / amount_eth  # ETH received / tokens sold (normalized)
 
+            # Get primary liquidity source
+            sources = data.get("sources", [])
+            primary_source = "0x"
+            for src in sources:
+                if float(src.get("proportion", 0)) > 0:
+                    primary_source = src.get("name", "0x")
+                    break
 
-# =============================================================================
-# UNISWAP V3 QUOTES
-# =============================================================================
+            # Gas estimate
+            gas_price = int(data.get("gasPrice", 30e9))
+            gas_estimate = int(data.get("estimatedGas", 200000))
+            gas_cost_eth = (gas_price * gas_estimate) / 1e18
 
-def get_uniswap_quote(token_addr: str, fee: int, amount_eth: float, direction: str) -> Optional[float]:
-    """
-    Get Uniswap V3 quote using 1inch API (more reliable than direct quoter)
-    """
-    amount_wei = int(amount_eth * 1e18)
+            return (price, primary_source, gas_cost_eth)
 
-    if direction == "buy":  # WETH -> Token
-        src = WETH
-        dst = token_addr
-    else:  # Token -> WETH
-        src = token_addr
-        dst = WETH
-
-    try:
-        # Use 1inch Fusion API for accurate quotes
-        url = f"https://api.1inch.dev/swap/v6.0/1/quote"
-        params = {
-            "src": src,
-            "dst": dst,
-            "amount": str(amount_wei),
-        }
-        headers = {"Authorization": "Bearer demo"}  # Public demo key
-        resp = requests.get(url, params=params, headers=headers, timeout=5)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            if "dstAmount" in data:
-                amount_out = int(data["dstAmount"]) / 1e18
-                if amount_out > 0:
-                    if direction == "buy":
-                        return amount_eth / amount_out
-                    else:
-                        return amount_out / amount_eth
-    except:
-        pass
-
-    # Fallback: Try Paraswap
-    try:
-        url = f"https://apiv5.paraswap.io/prices"
-        params = {
-            "srcToken": src,
-            "destToken": dst,
-            "amount": str(amount_wei),
-            "srcDecimals": 18,
-            "destDecimals": 18,
-            "network": 1,
-        }
-        resp = requests.get(url, params=params, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "priceRoute" in data and "destAmount" in data["priceRoute"]:
-                amount_out = int(data["priceRoute"]["destAmount"]) / 1e18
-                if amount_out > 0:
-                    if direction == "buy":
-                        return amount_eth / amount_out
-                    else:
-                        return amount_out / amount_eth
-    except:
-        pass
-
-    return None
-
-
-# =============================================================================
-# BALANCER V2 QUOTES
-# =============================================================================
-
-def get_balancer_quote(pool_id: str, token_addr: str, amount_eth: float, direction: str) -> Optional[float]:
-    """
-    Get Balancer quote using queryBatchSwap
-    This is a simplified single-swap query
-    """
-    amount_wei = int(amount_eth * 1e18)
-
-    if direction == "buy":  # WETH -> Token
-        asset_in_idx = 0
-        asset_out_idx = 1
-        assets = [WETH, token_addr]
-    else:  # Token -> WETH
-        asset_in_idx = 0
-        asset_out_idx = 1
-        assets = [token_addr, WETH]
-
-    # queryBatchSwap is complex - use simplified swap query
-    # For now, estimate from pool reserves
-
-    # Alternative: Use Balancer SOR API
-    try:
-        # Balancer has a public API for quotes
-        sor_url = "https://api.balancer.fi/sor/1"
-        payload = {
-            "sellToken": WETH if direction == "buy" else token_addr,
-            "buyToken": token_addr if direction == "buy" else WETH,
-            "sellAmount": str(amount_wei),
-            "orderKind": "sell",
-            "gasPrice": "30000000000"
-        }
-        resp = requests.post(sor_url, json=payload, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "returnAmount" in data:
-                amount_out = int(data["returnAmount"]) / 1e18
-                if amount_out > 0:
-                    if direction == "buy":
-                        return amount_eth / amount_out
-                    else:
-                        return amount_out / amount_eth
-    except:
-        pass
-
-    return None
-
-
-# =============================================================================
-# MAVERICK V2 QUOTES
-# =============================================================================
-
-def get_maverick_quote(pool_addr: str, token_addr: str, amount_eth: float, direction: str) -> Optional[float]:
-    """
-    Get Maverick V2 quote
-    Maverick uses a different quoting mechanism with tick-based liquidity
-    """
-    amount_wei = int(amount_eth * 1e18)
-
-    # Maverick Quoter: calculateSwap(address pool, uint128 amount, bool tokenAIn, bool exactOutput, int32 tickLimit)
-    # This is simplified - Maverick's actual interface is more complex
-
-    try:
-        # Try Maverick API
-        api_url = f"https://api.mav.xyz/v1/quote"
-        params = {
-            "chainId": 1,
-            "poolAddress": pool_addr,
-            "amount": str(amount_wei),
-            "tokenIn": WETH if direction == "buy" else token_addr,
-            "tokenOut": token_addr if direction == "buy" else WETH,
-        }
-        resp = requests.get(api_url, params=params, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "amountOut" in data:
-                amount_out = int(data["amountOut"]) / 1e18
-                if amount_out > 0:
-                    if direction == "buy":
-                        return amount_eth / amount_out
-                    else:
-                        return amount_out / amount_eth
-    except:
-        pass
-
-    # Fallback: Direct pool query (simplified)
-    # getMavTickSpacing, calculateSwap etc would go here
     return None
 
 
@@ -430,64 +298,19 @@ def scan_all_pools(amount_eth: float = 5) -> List[PoolQuote]:
         sell = get_curve_quote(pool_addr, amount_eth, "sell")
         if buy and sell:
             quotes.append(PoolQuote(
-                dex="Curve",
-                pool_name=pool_name,
-                token=token,
-                buy_price=buy,
-                sell_price=sell,
+                dex=f"0x({buy_source})",
+                pool_name=f"{token_name}-WETH",
+                token=token_name,
+                buy_price=buy_price,
+                sell_price=sell_price,
                 liquidity_ok=True
             ))
+            print(f"    {token_name}: buy={buy_price:.6f} via {buy_source}, sell={sell_price:.6f} via {sell_source}")
+        else:
+            print(f"    {token_name}: No quotes available")
 
-    # --- Uniswap V3 (ezETH) ---
-    for pool_name, config in UNISWAP_POOLS.items():
-        token = config["token"]
-        token_addr = TOKENS.get(token)
-        if token_addr:
-            buy = get_uniswap_quote(token_addr, config["fee"], amount_eth, "buy")
-            sell = get_uniswap_quote(token_addr, config["fee"], amount_eth, "sell")
-            if buy and sell:
-                quotes.append(PoolQuote(
-                    dex="UniV3",
-                    pool_name=pool_name,
-                    token=token,
-                    buy_price=buy,
-                    sell_price=sell,
-                    liquidity_ok=True
-                ))
-
-    # --- Balancer (ezETH, rETH) ---
-    for pool_name, pool_id in BALANCER_POOLS.items():
-        token = pool_name.split("-")[0]
-        token_addr = TOKENS.get(token)
-        if token_addr:
-            buy = get_balancer_quote(pool_id, token_addr, amount_eth, "buy")
-            sell = get_balancer_quote(pool_id, token_addr, amount_eth, "sell")
-            if buy and sell:
-                quotes.append(PoolQuote(
-                    dex="Balancer",
-                    pool_name=pool_name,
-                    token=token,
-                    buy_price=buy,
-                    sell_price=sell,
-                    liquidity_ok=True
-                ))
-
-    # --- Maverick (swETH, wstETH) ---
-    for pool_name, pool_addr in MAVERICK_POOLS.items():
-        token = pool_name.split("-")[0]
-        token_addr = TOKENS.get(token)
-        if token_addr:
-            buy = get_maverick_quote(pool_addr, token_addr, amount_eth, "buy")
-            sell = get_maverick_quote(pool_addr, token_addr, amount_eth, "sell")
-            if buy and sell:
-                quotes.append(PoolQuote(
-                    dex="Maverick",
-                    pool_name=pool_name,
-                    token=token,
-                    buy_price=buy,
-                    sell_price=sell,
-                    liquidity_ok=True
-                ))
+        # Small delay to avoid rate limiting
+        time.sleep(0.2)
 
     return quotes
 
@@ -603,8 +426,8 @@ def run_scanner():
             print(f"  SCAN #{stats['scans']} | {datetime.now().strftime('%H:%M:%S')}")
             print(f"{'─' * 75}")
 
-            # Get all quotes
-            quotes = scan_all_pools(5)
+            # Get all quotes via 0x API
+            quotes = scan_all_tokens(5)
 
             if quotes:
                 print_quotes(quotes)
