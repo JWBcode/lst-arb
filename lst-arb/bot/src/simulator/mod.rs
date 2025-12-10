@@ -1,11 +1,14 @@
 use ethers::prelude::*;
 use ethers::types::{Address, U256, Bytes, TransactionRequest};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, warn, info};
 
 use crate::rpc::WsClient;
 use crate::detector::Opportunity;
 use crate::price::Venue;
+
+/// Expected chain ID for Arbitrum One
+const ARBITRUM_CHAIN_ID: u64 = 42161;
 
 abigen!(
     LstArbitrage,
@@ -33,7 +36,24 @@ impl Simulator {
     pub fn new(arb_contract: Address) -> Self {
         Self { arb_contract }
     }
-    
+
+    /// Verify we're connected to Arbitrum One (chain ID 42161)
+    pub async fn verify_chain(&self, client: Arc<WsClient>) -> eyre::Result<bool> {
+        let chain_id = client.get_chainid().await?;
+        let chain_id_u64 = chain_id.as_u64();
+
+        if chain_id_u64 != ARBITRUM_CHAIN_ID {
+            warn!(
+                "Chain ID mismatch! Expected {} (Arbitrum One), got {}",
+                ARBITRUM_CHAIN_ID, chain_id_u64
+            );
+            return Ok(false);
+        }
+
+        info!("Connected to Arbitrum One (chain ID: {})", chain_id_u64);
+        Ok(true)
+    }
+
     /// Simulate the arbitrage transaction using eth_call
     /// This is the final check before execution
     pub async fn simulate(
@@ -129,6 +149,7 @@ impl Simulator {
     }
     
     /// Build the actual transaction for execution
+    /// Uses the passed client instead of hardcoded RPC URL
     pub fn build_transaction(
         &self,
         opportunity: &Opportunity,
@@ -138,32 +159,50 @@ impl Simulator {
         max_priority_fee: U256,
         nonce: U256,
     ) -> TypedTransaction {
-        let contract = LstArbitrage::new(
-            self.arb_contract,
-            Arc::new(Provider::<Http>::try_from("http://localhost:8545").unwrap())
-        );
-        
-        let call = contract.execute_arb(
-            opportunity.token,
-            opportunity.trade_amount,
-            opportunity.buy_venue.to_u8(),
-            opportunity.sell_venue.to_u8(),
-            min_profit,
-        );
-        
-        let mut tx: TypedTransaction = call.tx.clone();
-        
-        // Set EIP-1559 gas parameters
-        tx.set_gas(gas_limit);
-        
-        if let TypedTransaction::Eip1559(ref mut eip1559) = tx {
-            eip1559.max_fee_per_gas = Some(max_fee_per_gas);
-            eip1559.max_priority_fee_per_gas = Some(max_priority_fee);
-        }
-        
-        tx.set_nonce(nonce);
-        
-        tx
+        // Build transaction data manually without needing a provider
+        // The executeArb function signature: executeArb(address,uint256,uint8,uint8,uint256)
+        let selector = ethers::utils::id("executeArb(address,uint256,uint8,uint8,uint256)");
+
+        let mut data = selector[0..4].to_vec();
+
+        // Encode parameters (each padded to 32 bytes)
+        // 1. address lst (padded to 32 bytes)
+        data.extend_from_slice(&[0u8; 12]); // 12 zero bytes
+        data.extend_from_slice(opportunity.token.as_bytes());
+
+        // 2. uint256 amount
+        let mut amount_bytes = [0u8; 32];
+        opportunity.trade_amount.to_big_endian(&mut amount_bytes);
+        data.extend_from_slice(&amount_bytes);
+
+        // 3. uint8 buyVenue (padded to 32 bytes)
+        let mut buy_venue_bytes = [0u8; 32];
+        buy_venue_bytes[31] = opportunity.buy_venue.to_u8();
+        data.extend_from_slice(&buy_venue_bytes);
+
+        // 4. uint8 sellVenue (padded to 32 bytes)
+        let mut sell_venue_bytes = [0u8; 32];
+        sell_venue_bytes[31] = opportunity.sell_venue.to_u8();
+        data.extend_from_slice(&sell_venue_bytes);
+
+        // 5. uint256 minProfit
+        let mut min_profit_bytes = [0u8; 32];
+        min_profit.to_big_endian(&mut min_profit_bytes);
+        data.extend_from_slice(&min_profit_bytes);
+
+        // Build EIP-1559 transaction for Arbitrum
+        let tx = Eip1559TransactionRequest {
+            to: Some(self.arb_contract.into()),
+            data: Some(data.into()),
+            gas: Some(gas_limit),
+            max_fee_per_gas: Some(max_fee_per_gas),
+            max_priority_fee_per_gas: Some(max_priority_fee),
+            nonce: Some(nonce),
+            chain_id: Some(ARBITRUM_CHAIN_ID.into()),
+            ..Default::default()
+        };
+
+        TypedTransaction::Eip1559(tx)
     }
 }
 

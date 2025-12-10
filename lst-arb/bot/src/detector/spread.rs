@@ -113,28 +113,36 @@ impl OpportunityDetector {
         trade_amount: U256,
     ) -> Option<Opportunity> {
         // Calculate spread:
-        // Buy: We spend `trade_amount` ETH, get `buy_amount` LST
-        // Sell: We sell `buy_amount` LST, get some ETH back
-        // Profit = ETH_out - ETH_in
-        
+        // Buy: We spend `trade_amount` ETH, get `lst_received` LST
+        // Sell: We sell `lst_received` LST, get ETH back
+        // Profit = ETH_out - ETH_in (trade_amount)
+
         let lst_received = buy_quote.buy_amount;
         if lst_received.is_zero() {
             return None;
         }
-        
-        // Scale sell_amount proportionally
-        // sell_quote.sell_amount is ETH received for `trade_amount` worth of LST
-        // We need ETH received for `lst_received` LST
-        
-        // Simplified calculation assuming linear pricing:
-        // sell_amount is already based on trade_amount input
-        // For more accuracy, we'd need to re-quote with exact LST amount
-        let eth_received = sell_quote.sell_amount;
-        
+
+        // CRITICAL FIX: Calculate ETH received based on actual LST received
+        // sell_quote contains: buy_amount (LST input for quote), sell_amount (ETH output)
+        // We need to scale: ETH_received = (lst_received / sell_quote.buy_amount) * sell_quote.sell_amount
+        // This accounts for the actual LST we'll have after buying
+
+        let sell_quote_lst_input = sell_quote.buy_amount;
+        if sell_quote_lst_input.is_zero() {
+            return None;
+        }
+
+        // Scale the sell output based on actual LST received from buy
+        // eth_received = lst_received * (sell_quote.sell_amount / sell_quote.buy_amount)
+        // Using checked math to prevent overflow: (lst_received * sell_amount) / buy_amount
+        let eth_received = lst_received
+            .checked_mul(sell_quote.sell_amount)?
+            .checked_div(sell_quote_lst_input)?;
+
         if eth_received <= trade_amount {
             return None; // No profit
         }
-        
+
         let profit = eth_received - trade_amount;
         
         // Calculate spread in basis points
