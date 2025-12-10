@@ -21,8 +21,8 @@ use crate::watcher::{SwapEvent, UNISWAP_V3_SWAP_TOPIC, UNISWAP_V2_SWAP_TOPIC,
     CURVE_TOKEN_EXCHANGE_TOPIC, CURVE_TOKEN_EXCHANGE_UNDERLYING_TOPIC, BALANCER_SWAP_TOPIC};
 
 /// Tier intervals in milliseconds
-const TIER2_PATROL_INTERVAL_MS: u64 = 500;
-const TIER3_LAZY_INTERVAL_MS: u64 = 60_000;
+const TIER2_PATROL_INTERVAL_MS: u64 = 1000;  // 1 second for Tier 2
+const TIER3_LAZY_INTERVAL_MS: u64 = 60_000;  // 60 seconds for Tier 3
 
 /// Promotion threshold: 0.5% price move
 const PROMOTION_THRESHOLD: f64 = 0.005;
@@ -575,6 +575,10 @@ pub async fn create_scheduler_with_scout(
 mod tests {
     use super::*;
 
+    // ========================================================================
+    // Tier Classification Tests
+    // ========================================================================
+
     #[test]
     fn test_tier_from_rank() {
         assert_eq!(TieredPool::tier_from_rank(1), ScanTier::Tier1Stream);
@@ -586,12 +590,68 @@ mod tests {
     }
 
     #[test]
+    fn test_tier_boundaries() {
+        // Test exact boundary conditions
+        assert_eq!(TieredPool::tier_from_rank(5), ScanTier::Tier1Stream);
+        assert_eq!(TieredPool::tier_from_rank(6), ScanTier::Tier2Patrol);
+        assert_eq!(TieredPool::tier_from_rank(20), ScanTier::Tier2Patrol);
+        assert_eq!(TieredPool::tier_from_rank(21), ScanTier::Tier3Lazy);
+    }
+
+    #[test]
+    fn test_scan_tier_display() {
+        assert_eq!(format!("{}", ScanTier::Tier1Stream), "Tier1-Stream");
+        assert_eq!(format!("{}", ScanTier::Tier2Patrol), "Tier2-Patrol");
+        assert_eq!(format!("{}", ScanTier::Tier3Lazy), "Tier3-Lazy");
+    }
+
+    // ========================================================================
+    // Price Change Calculation Tests
+    // ========================================================================
+
+    #[test]
     fn test_price_change_calculation() {
         let old = U256::from(1000u64);
         let new = U256::from(1005u64);
         let change = Scheduler::calculate_price_change(old, new);
         assert!((change - 0.005).abs() < 0.0001);
     }
+
+    #[test]
+    fn test_price_change_negative() {
+        let old = U256::from(1000u64);
+        let new = U256::from(995u64); // 0.5% decrease
+        let change = Scheduler::calculate_price_change(old, new);
+        assert!((change - 0.005).abs() < 0.0001); // Should be absolute value
+    }
+
+    #[test]
+    fn test_price_change_zero_old_price() {
+        let old = U256::zero();
+        let new = U256::from(1000u64);
+        let change = Scheduler::calculate_price_change(old, new);
+        assert_eq!(change, 0.0); // Avoid division by zero
+    }
+
+    #[test]
+    fn test_price_change_no_change() {
+        let old = U256::from(1000u64);
+        let new = U256::from(1000u64);
+        let change = Scheduler::calculate_price_change(old, new);
+        assert_eq!(change, 0.0);
+    }
+
+    #[test]
+    fn test_price_change_large_move() {
+        let old = U256::from(1000u64);
+        let new = U256::from(1100u64); // 10% increase
+        let change = Scheduler::calculate_price_change(old, new);
+        assert!((change - 0.1).abs() < 0.0001);
+    }
+
+    // ========================================================================
+    // Promotion Threshold Tests
+    // ========================================================================
 
     #[test]
     fn test_promotion_threshold() {
@@ -606,5 +666,144 @@ mod tests {
         let new_large = U256::from(1006u64);
         let change_large = Scheduler::calculate_price_change(old, new_large);
         assert!(change_large > PROMOTION_THRESHOLD);
+    }
+
+    #[test]
+    fn test_promotion_threshold_exact() {
+        // Exactly 0.5% should trigger promotion (>= threshold)
+        let old = U256::from(10000u64);
+        let new = U256::from(10050u64);
+        let change = Scheduler::calculate_price_change(old, new);
+        assert!((change - 0.005).abs() < 0.0001);
+        assert!(change >= PROMOTION_THRESHOLD);
+    }
+
+    // ========================================================================
+    // TieredPool Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tiered_pool_creation() {
+        let pool = TieredPool::new(
+            Address::zero(),
+            "TEST".to_string(),
+            Address::zero(),
+            1,
+        );
+        assert_eq!(pool.tier, ScanTier::Tier1Stream);
+        assert_eq!(pool.volume_rank, 1);
+        assert!(pool.last_price.is_none());
+        assert!(pool.promotion_time.is_none());
+        assert!(pool.original_tier.is_none());
+    }
+
+    #[test]
+    fn test_tiered_pool_promotion() {
+        let mut pool = TieredPool::new(
+            Address::zero(),
+            "TEST".to_string(),
+            Address::zero(),
+            25, // Tier 3
+        );
+        assert_eq!(pool.tier, ScanTier::Tier3Lazy);
+
+        pool.promote_to_tier1();
+
+        assert_eq!(pool.tier, ScanTier::Tier1Stream);
+        assert_eq!(pool.original_tier, Some(ScanTier::Tier3Lazy));
+        assert!(pool.promotion_time.is_some());
+    }
+
+    #[test]
+    fn test_tiered_pool_promotion_idempotent() {
+        let mut pool = TieredPool::new(
+            Address::zero(),
+            "TEST".to_string(),
+            Address::zero(),
+            1, // Already Tier 1
+        );
+        assert_eq!(pool.tier, ScanTier::Tier1Stream);
+
+        pool.promote_to_tier1();
+
+        // Should remain unchanged
+        assert_eq!(pool.tier, ScanTier::Tier1Stream);
+        assert!(pool.original_tier.is_none()); // Never set
+        assert!(pool.promotion_time.is_none()); // Never set
+    }
+
+    #[test]
+    fn test_tiered_pool_demotion_not_ready() {
+        let mut pool = TieredPool::new(
+            Address::zero(),
+            "TEST".to_string(),
+            Address::zero(),
+            25,
+        );
+        pool.promote_to_tier1();
+
+        // Immediately check demotion - should not demote (1 hour hasn't passed)
+        let demoted = pool.check_demotion();
+        assert!(!demoted);
+        assert_eq!(pool.tier, ScanTier::Tier1Stream);
+    }
+
+    // ========================================================================
+    // Interval Configuration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tier2_interval() {
+        assert_eq!(TIER2_PATROL_INTERVAL_MS, 1000); // 1 second
+    }
+
+    #[test]
+    fn test_tier3_interval() {
+        assert_eq!(TIER3_LAZY_INTERVAL_MS, 60_000); // 60 seconds
+    }
+
+    #[test]
+    fn test_promotion_duration() {
+        assert_eq!(PROMOTION_DURATION_SECS, 3600); // 1 hour
+    }
+
+    #[test]
+    fn test_promotion_threshold_value() {
+        assert_eq!(PROMOTION_THRESHOLD, 0.005); // 0.5%
+    }
+
+    // ========================================================================
+    // ScanTier Equality Tests
+    // ========================================================================
+
+    #[test]
+    fn test_scan_tier_equality() {
+        assert_eq!(ScanTier::Tier1Stream, ScanTier::Tier1Stream);
+        assert_ne!(ScanTier::Tier1Stream, ScanTier::Tier2Patrol);
+        assert_ne!(ScanTier::Tier2Patrol, ScanTier::Tier3Lazy);
+    }
+
+    #[test]
+    fn test_scan_tier_clone() {
+        let tier = ScanTier::Tier1Stream;
+        let cloned = tier.clone();
+        assert_eq!(tier, cloned);
+    }
+
+    #[test]
+    fn test_scan_tier_copy() {
+        let tier = ScanTier::Tier1Stream;
+        let copied = tier; // Copy
+        assert_eq!(tier, copied);
+    }
+
+    #[test]
+    fn test_scan_tier_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ScanTier::Tier1Stream);
+        set.insert(ScanTier::Tier2Patrol);
+        set.insert(ScanTier::Tier3Lazy);
+        assert_eq!(set.len(), 3);
     }
 }
