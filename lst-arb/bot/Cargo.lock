@@ -295,7 +295,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -960,25 +959,6 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
-]
-
-[[package]]
-name = "ethers-flashbots"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "907a9f03a785270ba34208e523f6af607771a7415a0cd71f776449c11920acfd"
-dependencies = [
- "async-trait",
- "chrono",
- "ethers",
- "futures-core",
- "futures-util",
- "pin-project",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "url",
 ]
 
 [[package]]
@@ -1920,7 +1900,6 @@ dependencies = [
  "dashmap",
  "dotenv",
  "ethers",
- "ethers-flashbots",
  "eyre",
  "futures",
  "hex",
@@ -3509,10 +3488,8 @@ checksum = "212d5dcb2a1ce06d81107c3d0ffa3121fe974b73f068c8282cb1c32328113b6c"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
  "rustls",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tungstenite",
  "webpki-roots",
@@ -3697,7 +3674,6 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "native-tls",
  "rand 0.8.5",
  "rustls",
  "sha1",

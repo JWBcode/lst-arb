@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Ethereum
+# Ethereum (Arbitrum-compatible)
 ethers = { version = "2.0", features = ["ws", "rustls", "abigen"] }
-ethers-flashbots = "0.14"
+# Note: ethers-flashbots removed - Arbitrum uses FIFO sequencer, no MEV
 
 # Async runtime
 tokio = { version = "1.34", features = ["full", "rt-multi-thread", "macros", "sync", "time"] }
