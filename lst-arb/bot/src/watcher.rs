@@ -54,12 +54,18 @@ impl WatcherConfig {
     pub fn arbitrum_lst_pools() -> Self {
         Self {
             uniswap_v3_pools: vec![
+                // LST Pools (wstETH, rETH)
                 // wstETH/ETH 0.05%
                 "0x35218a1cbaC5Bbc3E57fd9Bd38219D37571b3537".parse().unwrap(),
                 // wstETH/ETH 0.01%
                 "0x7A20B2F07d5B2A9aE5F1F24b8C3c0c9F7b9e4C3A".parse().unwrap(),
                 // rETH/ETH 0.05%
                 "0x09BA4E5F0D0f0C3A0a7AC7D7A05c1C0A0B0C0D0E".parse().unwrap(),
+                // LRT Pools (weETH, ezETH) - High yield opportunities
+                // weETH/ETH 0.05% (500 fee tier)
+                "0xA169d1aB5c948555954D38700a6cDAA7A4E0c3A0".parse().unwrap(),
+                // ezETH/ETH 0.01% (100 fee tier)
+                "0x40cc6f68400958bf7225e8a762d3ad41c1064086".parse().unwrap(),
             ],
             uniswap_v2_pools: vec![
                 // Camelot wstETH/ETH (Uniswap V2 fork)
