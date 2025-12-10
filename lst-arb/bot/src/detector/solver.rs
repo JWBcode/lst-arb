@@ -9,7 +9,7 @@
 use ethers::prelude::*;
 use ethers::types::{Address, U256};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::rpc::WsClient;
 use crate::price::Venue;
