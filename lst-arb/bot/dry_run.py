@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-LST/LRT Arbitrage Scanner - Phase 1: 0x API Integration
+LST/LRT Arbitrage Scanner - Arbitrum One with Waterfall Depth Check
 Monitors LST/LRT tokens using 0x API for cross-DEX quotes.
+Implements waterfall liquidity depth checking to map Arbitrum liquidity.
 """
 
 import time
 import requests
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # =============================================================================
@@ -16,9 +17,9 @@ from typing import Optional, Dict, List, Tuple
 
 RPC_URL = "https://arb1.arbitrum.io/rpc"
 
-# 0x API Configuration - Arbitrum
+# 0x API Configuration - Arbitrum (v2 API)
 ZERO_EX_API_KEY = "c09b957e-9f63-4147-9f20-1fcf992eeb6c"
-ZERO_EX_API_URL = "https://arbitrum.api.0x.org/swap/v1"
+ZERO_EX_API_URL = "https://api.0x.org/swap/permit2"  # v2 API for Arbitrum
 CHAIN_ID = 42161
 
 # User-Agent to bypass Cloudflare bot detection
@@ -35,12 +36,16 @@ TOKENS = {
 }
 
 # =============================================================================
-# SCANNER SETTINGS
+# SCANNER SETTINGS - Waterfall Depth Check
 # =============================================================================
 
 MIN_SPREAD_BPS = 5
-TRADE_SIZES_ETH = [0.1, 0.25, 0.5]  # Reduced for <$200 capital on L2
+SKIP_SPREAD_BPS = -50  # -0.5% spread threshold to skip token
 GAS_COST_ETH = 0.0001  # Arbitrum L2 gas is much cheaper
+
+# Waterfall depth levels (in ETH)
+INITIAL_CHECK_ETH = 1.0  # First pass: check viability
+DEPTH_LEVELS_ETH = [5.0, 10.0, 25.0]  # Deeper liquidity mapping
 
 
 # =============================================================================
@@ -55,6 +60,18 @@ class PoolQuote:
     buy_price: float   # ETH per token when buying token
     sell_price: float  # ETH per token when selling token
     liquidity_ok: bool
+    trade_size_eth: float = 1.0
+
+
+@dataclass
+class LiquidityDepth:
+    """Tracks liquidity depth at various trade sizes"""
+    token: str
+    viable: bool  # Passed initial check (spread >= -0.5%)
+    initial_spread_bps: float
+    depth_map: Dict[float, float] = field(default_factory=dict)  # size_eth -> spread_bps
+    max_profitable_size: float = 0.0
+    best_spread_bps: float = 0.0
 
 
 @dataclass
@@ -68,6 +85,7 @@ class Opportunity:
     trade_size_eth: float
     gross_profit_eth: float
     net_profit_eth: float
+    depth_info: Optional[LiquidityDepth] = None
 
 
 # =============================================================================
@@ -75,9 +93,10 @@ class Opportunity:
 # =============================================================================
 
 def get_0x_headers() -> dict:
-    """Get headers for 0x API requests"""
+    """Get headers for 0x API v2 requests"""
     return {
         "0x-api-key": ZERO_EX_API_KEY,
+        "0x-version": "v2",  # Required for v2 API
         "Accept": "application/json",
         "User-Agent": USER_AGENT,
     }
@@ -85,7 +104,7 @@ def get_0x_headers() -> dict:
 
 def get_0x_quote(sell_token: str, buy_token: str, sell_amount_wei: int) -> Optional[dict]:
     """
-    Get price quote from 0x API.
+    Get price quote from 0x API v2 for Arbitrum.
     Returns full response including price, sources, and gas estimate.
     """
     try:
@@ -94,22 +113,35 @@ def get_0x_quote(sell_token: str, buy_token: str, sell_amount_wei: int) -> Optio
             "sellToken": sell_token,
             "buyToken": buy_token,
             "sellAmount": str(sell_amount_wei),
+            "chainId": CHAIN_ID,  # Required for Arbitrum One
         }
         resp = requests.get(url, params=params, headers=get_0x_headers(), timeout=10)
 
         if resp.status_code == 200:
-            return resp.json()
+            data = resp.json()
+            # v2 API returns liquidityAvailable flag
+            if not data.get("liquidityAvailable", False):
+                return None  # No liquidity route found
+            return data
+        elif resp.status_code == 429:
+            print(f"    Rate limited, waiting...")
+            time.sleep(2)
+            return None
         else:
-            print(f"    0x API error: {resp.status_code} - {resp.text[:100]}")
+            # Only show error for non-rate-limit issues
+            if resp.status_code != 400:  # 400 often means no route found
+                print(f"    0x API error: {resp.status_code}")
+    except requests.exceptions.Timeout:
+        print(f"    0x API timeout")
     except Exception as e:
-        print(f"    0x API exception: {e}")
+        print(f"    0x API exception: {type(e).__name__}")
 
     return None
 
 
 def get_token_quote(token_name: str, token_addr: str, amount_eth: float, direction: str) -> Optional[Tuple[float, str, float]]:
     """
-    Get quote for a token using 0x API.
+    Get quote for a token using 0x API v2 on Arbitrum.
 
     Args:
         token_name: Name of the token (for logging)
@@ -140,17 +172,16 @@ def get_token_quote(token_name: str, token_addr: str, amount_eth: float, directi
             else:
                 price = buy_amount / amount_eth  # ETH received / tokens sold
 
-            # Get primary liquidity source
-            sources = data.get("sources", [])
+            # Get primary liquidity source from v2 route
             primary_source = "0x"
-            for src in sources:
-                if float(src.get("proportion", 0)) > 0:
-                    primary_source = src.get("name", "0x")
-                    break
+            route = data.get("route", {})
+            fills = route.get("fills", [])
+            if fills:
+                primary_source = fills[0].get("source", "0x")
 
-            # Gas estimate
-            gas_price = int(data.get("gasPrice", 30e9))
-            gas_estimate = int(data.get("estimatedGas", 200000))
+            # Gas estimate from v2 response
+            gas_price = int(data.get("gasPrice", "10000000"))  # v2 returns as string
+            gas_estimate = int(data.get("gas", "200000"))  # v2 uses "gas" not "estimatedGas"
             gas_cost_eth = (gas_price * gas_estimate) / 1e18
 
             return (price, primary_source, gas_cost_eth)
@@ -159,89 +190,262 @@ def get_token_quote(token_name: str, token_addr: str, amount_eth: float, directi
 
 
 # =============================================================================
+# WATERFALL DEPTH CHECK
+# =============================================================================
+
+def calculate_spread_bps(buy_price: float, sell_price: float) -> float:
+    """Calculate spread in basis points"""
+    if buy_price <= 0:
+        return -10000  # Invalid
+    return ((sell_price - buy_price) / buy_price) * 10000
+
+
+def check_token_viability(token_name: str, token_addr: str, check_amount: float = 1.0) -> Tuple[bool, float, Optional[Tuple[float, float, str]]]:
+    """
+    Initial viability check for a token at small trade size.
+
+    Returns:
+        (viable, spread_bps, (buy_price, sell_price, source) or None)
+        viable = True if spread >= SKIP_SPREAD_BPS (-0.5%)
+    """
+    buy_result = get_token_quote(token_name, token_addr, check_amount, "buy")
+    time.sleep(0.15)  # Rate limiting
+    sell_result = get_token_quote(token_name, token_addr, check_amount, "sell")
+
+    if not buy_result or not sell_result:
+        return False, -10000, None
+
+    buy_price, buy_source, _ = buy_result
+    sell_price, sell_source, _ = sell_result
+
+    spread_bps = calculate_spread_bps(buy_price, sell_price)
+
+    viable = spread_bps >= SKIP_SPREAD_BPS
+    return viable, spread_bps, (buy_price, sell_price, buy_source)
+
+
+def map_liquidity_depth(token_name: str, token_addr: str, depth_levels: List[float]) -> LiquidityDepth:
+    """
+    Map liquidity depth for a token at increasing trade sizes.
+    Only called for tokens that pass the initial viability check.
+    """
+    depth = LiquidityDepth(
+        token=token_name,
+        viable=True,
+        initial_spread_bps=0,
+        depth_map={},
+        max_profitable_size=0,
+        best_spread_bps=-10000
+    )
+
+    for size_eth in depth_levels:
+        buy_result = get_token_quote(token_name, token_addr, size_eth, "buy")
+        time.sleep(0.15)
+        sell_result = get_token_quote(token_name, token_addr, size_eth, "sell")
+
+        if buy_result and sell_result:
+            buy_price, _, _ = buy_result
+            sell_price, _, _ = sell_result
+            spread_bps = calculate_spread_bps(buy_price, sell_price)
+
+            depth.depth_map[size_eth] = spread_bps
+
+            # Track best spread and max profitable size
+            if spread_bps > depth.best_spread_bps:
+                depth.best_spread_bps = spread_bps
+
+            if spread_bps > 0:
+                depth.max_profitable_size = size_eth
+        else:
+            depth.depth_map[size_eth] = None  # No liquidity at this depth
+
+        time.sleep(0.1)  # Rate limiting between depth checks
+
+    return depth
+
+
+def waterfall_scan_token(token_name: str, token_addr: str) -> Optional[Tuple[LiquidityDepth, List[PoolQuote]]]:
+    """
+    Waterfall depth check for a single token.
+
+    1. Query at INITIAL_CHECK_ETH (1.0 ETH)
+    2. If spread < SKIP_SPREAD_BPS (-0.5%), SKIP the token
+    3. If viable, query deeper liquidity at DEPTH_LEVELS_ETH
+
+    Returns: (LiquidityDepth, [PoolQuote]) or None if token should be skipped
+    """
+    # Step 1: Initial viability check
+    viable, initial_spread, quote_data = check_token_viability(
+        token_name, token_addr, INITIAL_CHECK_ETH
+    )
+
+    if not viable:
+        return None  # Skip this token
+
+    # Create depth tracker
+    depth = LiquidityDepth(
+        token=token_name,
+        viable=True,
+        initial_spread_bps=initial_spread,
+        depth_map={INITIAL_CHECK_ETH: initial_spread},
+        best_spread_bps=initial_spread,
+        max_profitable_size=INITIAL_CHECK_ETH if initial_spread > 0 else 0
+    )
+
+    quotes = []
+
+    if quote_data:
+        buy_price, sell_price, source = quote_data
+        quotes.append(PoolQuote(
+            dex=f"0x({source})",
+            pool_name=f"{token_name}-WETH",
+            token=token_name,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            liquidity_ok=True,
+            trade_size_eth=INITIAL_CHECK_ETH
+        ))
+
+    # Step 2: Deep liquidity mapping (only if initial check passes)
+    if initial_spread >= MIN_SPREAD_BPS:
+        print(f"      ↳ Mapping liquidity depth...", end=" ", flush=True)
+
+        for size_eth in DEPTH_LEVELS_ETH:
+            buy_result = get_token_quote(token_name, token_addr, size_eth, "buy")
+            time.sleep(0.15)
+            sell_result = get_token_quote(token_name, token_addr, size_eth, "sell")
+
+            if buy_result and sell_result:
+                buy_price, source, _ = buy_result
+                sell_price, _, _ = sell_result
+                spread_bps = calculate_spread_bps(buy_price, sell_price)
+
+                depth.depth_map[size_eth] = spread_bps
+
+                if spread_bps > depth.best_spread_bps:
+                    depth.best_spread_bps = spread_bps
+
+                if spread_bps > 0:
+                    depth.max_profitable_size = size_eth
+
+                quotes.append(PoolQuote(
+                    dex=f"0x({source})",
+                    pool_name=f"{token_name}-WETH",
+                    token=token_name,
+                    buy_price=buy_price,
+                    sell_price=sell_price,
+                    liquidity_ok=True,
+                    trade_size_eth=size_eth
+                ))
+
+                print(f"{size_eth}ETH:{spread_bps:+.0f}bps", end=" ", flush=True)
+            else:
+                depth.depth_map[size_eth] = None
+                print(f"{size_eth}ETH:N/A", end=" ", flush=True)
+
+            time.sleep(0.1)
+
+        print()  # Newline after depth map
+
+    return depth, quotes
+
+
+# =============================================================================
 # MAIN SCANNER
 # =============================================================================
 
-def scan_all_tokens(amount_eth: float = 5) -> List[PoolQuote]:
-    """Scan all configured tokens for prices using 0x API"""
-    quotes = []
+def scan_all_tokens_waterfall() -> Tuple[Dict[str, LiquidityDepth], List[PoolQuote]]:
+    """
+    Scan all tokens using waterfall depth check.
+    Returns depth info and quotes for viable tokens only.
+    """
+    all_depths = {}
+    all_quotes = []
+    skipped = []
 
-    print("\n  Fetching 0x API quotes for all tokens...")
+    print("\n  WATERFALL LIQUIDITY SCAN")
+    print("  " + "-" * 70)
+    print(f"  Initial check: {INITIAL_CHECK_ETH} ETH | Skip threshold: {SKIP_SPREAD_BPS} bps")
+    print(f"  Depth levels: {DEPTH_LEVELS_ETH} ETH")
+    print("  " + "-" * 70)
 
     for token_name, token_addr in TOKENS.items():
-        print(f"    {token_name}:", end=" ", flush=True)
+        print(f"\n  {token_name}:", end=" ", flush=True)
 
-        # Get buy quote (ETH -> Token)
-        buy_result = get_token_quote(token_name, token_addr, amount_eth, "buy")
+        result = waterfall_scan_token(token_name, token_addr)
 
-        # Get sell quote (Token -> ETH)
-        sell_result = get_token_quote(token_name, token_addr, amount_eth, "sell")
-
-        if buy_result and sell_result:
-            buy_price, buy_source, _ = buy_result
-            sell_price, sell_source, _ = sell_result
-
-            quotes.append(PoolQuote(
-                dex=f"0x({buy_source})",
-                pool_name=f"{token_name}-WETH",
-                token=token_name,
-                buy_price=buy_price,
-                sell_price=sell_price,
-                liquidity_ok=True
-            ))
-            print(f"buy={buy_price:.6f} via {buy_source}, sell={sell_price:.6f} via {sell_source}")
+        if result is None:
+            skipped.append(token_name)
+            print(f"\033[91mSKIPPED (spread < {SKIP_SPREAD_BPS} bps)\033[0m")
         else:
-            print("No quotes available")
+            depth, quotes = result
+            all_depths[token_name] = depth
+            all_quotes.extend(quotes)
 
-        # Rate limiting
-        time.sleep(0.2)
+            # Color code based on profitability
+            if depth.best_spread_bps >= MIN_SPREAD_BPS:
+                color = "\033[92m"  # Green
+                status = "PROFITABLE"
+            elif depth.initial_spread_bps >= 0:
+                color = "\033[93m"  # Yellow
+                status = "VIABLE"
+            else:
+                color = "\033[0m"  # Default
+                status = "LOW SPREAD"
 
-    return quotes
+            print(f"{color}{status}{color} | Initial: {depth.initial_spread_bps:+.1f} bps | Best: {depth.best_spread_bps:+.1f} bps\033[0m")
+
+        time.sleep(0.2)  # Rate limiting between tokens
+
+    if skipped:
+        print(f"\n  \033[91mSkipped tokens (illiquid): {', '.join(skipped)}\033[0m")
+
+    return all_depths, all_quotes
 
 
-def find_arbitrage(quotes: List[PoolQuote], trade_size: float) -> List[Opportunity]:
-    """Find arbitrage opportunities across pools"""
+def find_arbitrage_with_depth(depths: Dict[str, LiquidityDepth], quotes: List[PoolQuote]) -> List[Opportunity]:
+    """Find arbitrage opportunities considering liquidity depth"""
     opportunities = []
 
-    # Group quotes by token
-    by_token: Dict[str, List[PoolQuote]] = {}
+    # Group quotes by token and size
+    by_token_size: Dict[str, Dict[float, PoolQuote]] = {}
     for q in quotes:
-        if q.token not in by_token:
-            by_token[q.token] = []
-        by_token[q.token].append(q)
+        if q.token not in by_token_size:
+            by_token_size[q.token] = {}
+        by_token_size[q.token][q.trade_size_eth] = q
 
-    # Check each token for cross-pool arb
-    for token, token_quotes in by_token.items():
-        if len(token_quotes) < 2:
+    # Check each token's depth for profitable sizes
+    for token, depth in depths.items():
+        if token not in by_token_size:
             continue
 
-        for buy_q in token_quotes:
-            for sell_q in token_quotes:
-                if buy_q.pool_name == sell_q.pool_name:
-                    continue
+        for size_eth, spread_bps in depth.depth_map.items():
+            if spread_bps is None or spread_bps < MIN_SPREAD_BPS:
+                continue
 
-                # Buy on buy_q, sell on sell_q
-                # Profit if sell_price > buy_price
-                if sell_q.sell_price > buy_q.buy_price:
-                    spread_bps = ((sell_q.sell_price - buy_q.buy_price) / buy_q.buy_price) * 10000
+            if size_eth not in by_token_size[token]:
+                continue
 
-                    if spread_bps >= MIN_SPREAD_BPS:
-                        tokens_bought = trade_size / buy_q.buy_price
-                        eth_received = tokens_bought * sell_q.sell_price
-                        gross = eth_received - trade_size
-                        net = gross - GAS_COST_ETH
+            q = by_token_size[token][size_eth]
 
-                        opportunities.append(Opportunity(
-                            token=token,
-                            buy_dex=buy_q.dex,
-                            buy_pool=buy_q.pool_name,
-                            sell_dex=sell_q.dex,
-                            sell_pool=sell_q.pool_name,
-                            spread_bps=spread_bps,
-                            trade_size_eth=trade_size,
-                            gross_profit_eth=gross,
-                            net_profit_eth=net
-                        ))
+            # Calculate profit
+            tokens_bought = size_eth / q.buy_price
+            eth_received = tokens_bought * q.sell_price
+            gross = eth_received - size_eth
+            net = gross - GAS_COST_ETH
+
+            opportunities.append(Opportunity(
+                token=token,
+                buy_dex=q.dex,
+                buy_pool=q.pool_name,
+                sell_dex=q.dex,  # Same source via 0x
+                sell_pool=q.pool_name,
+                spread_bps=spread_bps,
+                trade_size_eth=size_eth,
+                gross_profit_eth=gross,
+                net_profit_eth=net,
+                depth_info=depth
+            ))
 
     return sorted(opportunities, key=lambda x: x.net_profit_eth, reverse=True)
 
@@ -261,19 +465,39 @@ def print_header():
     print("  Tokens:")
     print(f"    {', '.join(TOKENS.keys())}")
     print("=" * 75)
-    print(f"  Min Spread: {MIN_SPREAD_BPS} bps | Gas Est: {GAS_COST_ETH} ETH (L2)")
+    print(f"  Waterfall Check: {INITIAL_CHECK_ETH} ETH → {DEPTH_LEVELS_ETH} ETH")
+    print(f"  Skip Threshold: {SKIP_SPREAD_BPS} bps | Min Spread: {MIN_SPREAD_BPS} bps")
+    print(f"  Gas Est: {GAS_COST_ETH} ETH (L2)")
     print("=" * 75 + "\n")
 
 
-def print_quotes(quotes: List[PoolQuote]):
-    print("\n  POOL QUOTES:")
+def print_depth_summary(depths: Dict[str, LiquidityDepth]):
+    print("\n  LIQUIDITY DEPTH SUMMARY:")
     print("  " + "-" * 70)
-    print(f"  {'DEX':<18} {'Pool':<15} {'Token':<8} {'Buy':<12} {'Sell':<12} {'Spread':<10}")
+    print(f"  {'Token':<10} {'1 ETH':>10} {'5 ETH':>10} {'10 ETH':>10} {'25 ETH':>10} {'Max Size':>10}")
     print("  " + "-" * 70)
 
-    for q in quotes:
-        spread = (q.sell_price - q.buy_price) / q.buy_price * 10000
-        print(f"  {q.dex:<18} {q.pool_name:<15} {q.token:<8} {q.buy_price:<12.6f} {q.sell_price:<12.6f} {spread:>+8.1f} bps")
+    for token, depth in depths.items():
+        row = f"  {token:<10}"
+
+        for size in [INITIAL_CHECK_ETH] + DEPTH_LEVELS_ETH:
+            spread = depth.depth_map.get(size)
+            if spread is None:
+                row += f"{'N/A':>10}"
+            elif spread >= MIN_SPREAD_BPS:
+                row += f"\033[92m{spread:>+9.0f}bp\033[0m"
+            elif spread >= 0:
+                row += f"\033[93m{spread:>+9.0f}bp\033[0m"
+            else:
+                row += f"\033[91m{spread:>+9.0f}bp\033[0m"
+
+        # Max profitable size
+        if depth.max_profitable_size > 0:
+            row += f"\033[92m{depth.max_profitable_size:>9.0f}E\033[0m"
+        else:
+            row += f"{'0':>10}"
+
+        print(row)
 
 
 def print_opportunities(opps: List[Opportunity]):
@@ -284,13 +508,17 @@ def print_opportunities(opps: List[Opportunity]):
     print(f"\n  OPPORTUNITIES FOUND: {len(opps)}")
     print("  " + "-" * 70)
 
-    for i, opp in enumerate(opps[:5], 1):
+    for i, opp in enumerate(opps[:10], 1):
         color = "\033[92m" if opp.net_profit_eth > 0 else "\033[93m"
         reset = "\033[0m"
 
-        print(f"\n{color}  [{i}] {opp.token}: {opp.buy_dex}/{opp.buy_pool} -> {opp.sell_dex}/{opp.sell_pool}{reset}")
-        print(f"      Spread: {opp.spread_bps:.1f} bps | Size: {opp.trade_size_eth} ETH")
+        print(f"\n{color}  [{i}] {opp.token} @ {opp.trade_size_eth:.1f} ETH{reset}")
+        print(f"      Route: {opp.buy_dex} → {opp.sell_dex}")
+        print(f"      Spread: {opp.spread_bps:.1f} bps")
         print(f"      Gross: {opp.gross_profit_eth:+.6f} ETH | Net: {opp.net_profit_eth:+.6f} ETH (${opp.net_profit_eth * 3100:+.2f})")
+
+        if opp.depth_info:
+            print(f"      Max profitable size: {opp.depth_info.max_profitable_size:.0f} ETH")
 
 
 def run_scanner():
@@ -298,44 +526,41 @@ def run_scanner():
 
     stats = {"scans": 0, "opps": 0, "profitable": 0, "total_profit": 0.0}
 
-    print("Starting scanner... (Ctrl+C to stop)\n")
+    print("Starting scanner with Waterfall Depth Check... (Ctrl+C to stop)\n")
 
     try:
         while True:
             stats["scans"] += 1
-            print(f"\n{'─' * 75}")
+            print(f"\n{'═' * 75}")
             print(f"  SCAN #{stats['scans']} | {datetime.now().strftime('%H:%M:%S')}")
-            print(f"{'─' * 75}")
+            print(f"{'═' * 75}")
 
-            # Get all quotes via 0x API
-            quotes = scan_all_tokens(5)
+            # Waterfall scan all tokens
+            depths, quotes = scan_all_tokens_waterfall()
 
-            if quotes:
-                print_quotes(quotes)
+            if depths:
+                # Show liquidity depth summary
+                print_depth_summary(depths)
 
-                # Find opportunities across all trade sizes
-                all_opps = []
-                for size in TRADE_SIZES_ETH:
-                    opps = find_arbitrage(quotes, size)
-                    all_opps.extend(opps)
-
-                # Sort and display
-                all_opps = sorted(all_opps, key=lambda x: x.net_profit_eth, reverse=True)
-                print_opportunities(all_opps)
+                # Find opportunities with depth consideration
+                opps = find_arbitrage_with_depth(depths, quotes)
+                print_opportunities(opps)
 
                 # Update stats
-                for opp in all_opps[:5]:
+                for opp in opps[:5]:
                     stats["opps"] += 1
                     if opp.net_profit_eth > 0:
                         stats["profitable"] += 1
                         stats["total_profit"] += opp.net_profit_eth
             else:
-                print("\n  No quotes retrieved. Check API connection.")
+                print("\n  No viable tokens found. All tokens skipped due to low liquidity.")
 
             print(f"\n{'─' * 75}")
             print(f"  SESSION: {stats['opps']} opps | {stats['profitable']} profitable | {stats['total_profit']:.4f} ETH")
 
-            time.sleep(5)
+            # Longer wait between full scans since we're doing deeper checks
+            print(f"\n  Next scan in 10 seconds...")
+            time.sleep(10)
 
     except KeyboardInterrupt:
         print("\n\n" + "=" * 75)
