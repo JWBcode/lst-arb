@@ -3,11 +3,11 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use ethers::prelude::*;
-use ethers::types::{Address, U256};
+use ethers::types::Address;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
-use tracing::{info, warn, error, debug, Level};
+use tracing::{info, warn, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod config;
@@ -18,6 +18,7 @@ mod simulator;
 mod executor;
 mod monitor;
 mod scout;
+mod scheduler;
 mod watcher;
 
 use config::{Config, ParsedConfig};
@@ -26,10 +27,8 @@ use price::{MulticallQuoter, VenueAddresses};
 use detector::OpportunityDetector;
 use executor::Executor;
 use monitor::Monitor;
-use watcher::{CombinedWatcher, WatcherConfig, DetectionTrigger};
-
-// Arbitrum block time is ~250ms, backup poll every 2 blocks
-const BACKUP_POLL_INTERVAL_MS: u64 = 500;
+use scheduler::{Scheduler, TieredPool, ScanTier};
+use scout::Scout;
 
 // Arbitrum chain ID
 const ARBITRUM_CHAIN_ID: u64 = 42161;
@@ -48,8 +47,8 @@ async fn main() -> eyre::Result<()> {
         .init();
 
     info!("═══════════════════════════════════════════");
-    info!("    LST/LRT ARBITRAGE BOT v0.2.0");
-    info!("    Arbitrum Event-Driven Mode");
+    info!("    LST/LRT ARBITRAGE BOT v0.3.0");
+    info!("    Tiered L2 Scheduling Mode");
     info!("═══════════════════════════════════════════");
 
     // Load configuration
@@ -59,8 +58,7 @@ async fn main() -> eyre::Result<()> {
     info!("Configuration loaded");
     info!("  Min spread: {}bps", parsed.min_spread_bps);
     info!("  Min profit: {} ETH", ethers::utils::format_ether(parsed.min_profit));
-    info!("  Trade sizing: Convex optimization with 90% liquidity clamping");
-    info!("  Mode: Event-driven with {}ms backup polling", BACKUP_POLL_INTERVAL_MS);
+    info!("  Mode: Tiered L2 Scheduling (Stream/Patrol/Lazy)");
 
     // Initialize RPC load balancer
     let rpc_lb = Arc::new(RpcLoadBalancer::new(
@@ -114,28 +112,73 @@ async fn main() -> eyre::Result<()> {
 
     monitor.send_startup_message().await;
 
-    // Build token list
-    let tokens: Vec<(Address, String)> = config.strategy.enabled_tokens.iter()
+    // Initialize Scout and discover pools
+    info!("═══════════════════════════════════════════");
+    info!("Discovering pools via The Graph...");
+    info!("═══════════════════════════════════════════");
+
+    let scout = Scout::new();
+    let discovered_pools = match scout.discover_safe_pools(client.clone()).await {
+        Ok(pools) => {
+            info!("Discovered {} safe pools from The Graph", pools.len());
+            pools
+        }
+        Err(e) => {
+            warn!("Failed to discover pools from The Graph: {:?}", e);
+            warn!("Falling back to configured tokens");
+            Vec::new()
+        }
+    };
+
+    // Build tiered pools from discovered pools + configured tokens
+    let mut tiered_pools: Vec<TieredPool> = Vec::new();
+
+    // Add discovered pools with their ranks
+    for (rank, pool) in discovered_pools.iter().enumerate() {
+        tiered_pools.push(TieredPool::new(
+            pool.address,
+            format!("{}/{}", pool.token0_symbol, pool.token1_symbol),
+            pool.token0,
+            (rank + 1) as u32,
+        ));
+    }
+
+    // Add configured tokens as high-priority pools if not already discovered
+    let configured_tokens: Vec<(Address, String)> = config.strategy.enabled_tokens.iter()
         .filter_map(|name| {
             parsed.tokens.get(name).map(|addr| (*addr, name.clone()))
         })
         .collect();
 
-    info!("Monitoring {} tokens: {:?}", tokens.len(),
-        tokens.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>());
+    for (i, (token_addr, token_name)) in configured_tokens.iter().enumerate() {
+        // Check if already in discovered pools
+        let already_exists = tiered_pools.iter()
+            .any(|p| p.token_address == *token_addr);
 
-    // Quote amount for price discovery (actual trade size determined by solver)
-    let quote_amount = ethers::utils::parse_ether("1.0")?;
+        if !already_exists {
+            // Add configured tokens as Tier 1 (rank 1-5)
+            tiered_pools.push(TieredPool::new(
+                *token_addr, // Use token address as pool address placeholder
+                token_name.clone(),
+                *token_addr,
+                (i + 1) as u32, // High priority
+            ));
+        }
+    }
 
-    // Initialize event watcher for Arbitrum
-    let watcher_config = WatcherConfig::arbitrum_lst_pools();
-    let combined_watcher = CombinedWatcher::new(watcher_config, BACKUP_POLL_INTERVAL_MS);
+    info!("Total pools for scheduling: {}", tiered_pools.len());
 
-    info!("═══════════════════════════════════════════");
-    info!("Starting event-driven main loop");
-    info!("  Watching: Uniswap V3 Swaps, Curve TokenExchange, Balancer Swaps");
-    info!("  Backup poll: {}ms", BACKUP_POLL_INTERVAL_MS);
-    info!("═══════════════════════════════════════════");
+    // Log tier distribution
+    let tier1_count = tiered_pools.iter().filter(|p| p.tier == ScanTier::Tier1Stream).count();
+    let tier2_count = tiered_pools.iter().filter(|p| p.tier == ScanTier::Tier2Patrol).count();
+    let tier3_count = tiered_pools.iter().filter(|p| p.tier == ScanTier::Tier3Lazy).count();
+    info!("  Tier 1 (Stream): {} pools", tier1_count);
+    info!("  Tier 2 (Patrol): {} pools", tier2_count);
+    info!("  Tier 3 (Lazy): {} pools", tier3_count);
+
+    // Create scheduler
+    let (scheduler, mut opportunity_rx) = Scheduler::new(quoter.clone(), detector.clone());
+    scheduler.add_pools(tiered_pools).await;
 
     // Spawn health check task
     let rpc_lb_health = rpc_lb.clone();
@@ -174,132 +217,79 @@ async fn main() -> eyre::Result<()> {
         }
     });
 
-    // Start the combined watcher
-    let mut trigger_rx = combined_watcher.start(client.clone()).await?;
+    // Start the scheduler (spawns tier tasks internally)
+    scheduler.start(client.clone()).await?;
 
     // Track statistics
-    let mut event_triggers = 0u64;
-    let mut backup_triggers = 0u64;
-    let mut block_triggers = 0u64;
+    let mut tier_stats: std::collections::HashMap<ScanTier, u64> = std::collections::HashMap::new();
     let mut last_stats_log = Instant::now();
 
-    // Event-driven main loop
+    info!("═══════════════════════════════════════════");
+    info!("Tiered scheduler started - listening for opportunities");
+    info!("═══════════════════════════════════════════");
+
+    // Main loop: receive opportunities from scheduler and execute
     loop {
-        // Wait for a detection trigger
-        let trigger = match trigger_rx.recv().await {
-            Some(t) => t,
-            None => {
-                error!("Watcher channel closed, restarting...");
-                // Try to restart the watcher
-                if let Some(new_client) = rpc_lb.get_client().await {
-                    let watcher_config = WatcherConfig::arbitrum_lst_pools();
-                    let combined_watcher = CombinedWatcher::new(watcher_config, BACKUP_POLL_INTERVAL_MS);
-                    trigger_rx = combined_watcher.start(new_client).await?;
-                    continue;
+        match opportunity_rx.recv().await {
+            Some((tier, opportunities)) => {
+                let tier_count = tier_stats.entry(tier).or_insert(0);
+                *tier_count += 1;
+
+                // Log tier statistics periodically
+                if last_stats_log.elapsed() > Duration::from_secs(60) {
+                    info!(
+                        "Tier stats (1min): Stream={}, Patrol={}, Lazy={}",
+                        tier_stats.get(&ScanTier::Tier1Stream).unwrap_or(&0),
+                        tier_stats.get(&ScanTier::Tier2Patrol).unwrap_or(&0),
+                        tier_stats.get(&ScanTier::Tier3Lazy).unwrap_or(&0),
+                    );
+                    tier_stats.clear();
+                    last_stats_log = Instant::now();
                 }
-                warn!("Could not restart watcher, using fallback polling");
-                tokio::time::sleep(Duration::from_millis(BACKUP_POLL_INTERVAL_MS)).await;
-                DetectionTrigger::BackupPoll
-            }
-        };
 
-        let loop_start = Instant::now();
+                // Get fresh client
+                let client = match rpc_lb.get_client().await {
+                    Some(c) => c,
+                    None => {
+                        warn!("No healthy RPC available for execution");
+                        continue;
+                    }
+                };
 
-        // Track trigger type
-        match &trigger {
-            DetectionTrigger::SwapEvent(event) => {
-                event_triggers += 1;
-                debug!("Triggered by swap event: {:?}", event);
-            }
-            DetectionTrigger::NewBlock(num) => {
-                block_triggers += 1;
-                debug!("Triggered by new block: {}", num);
-            }
-            DetectionTrigger::BackupPoll => {
-                backup_triggers += 1;
-                debug!("Triggered by backup poll");
-            }
-        }
-
-        // Log trigger statistics periodically
-        if last_stats_log.elapsed() > Duration::from_secs(60) {
-            info!(
-                "Trigger stats (1min): events={}, blocks={}, backup={}",
-                event_triggers, block_triggers, backup_triggers
-            );
-            event_triggers = 0;
-            block_triggers = 0;
-            backup_triggers = 0;
-            last_stats_log = Instant::now();
-        }
-
-        // Get fresh client for this iteration
-        let client = match rpc_lb.get_client().await {
-            Some(c) => c,
-            None => {
-                warn!("No healthy RPC available, waiting...");
-                continue;
-            }
-        };
-
-        // Fetch all quotes in single multicall
-        let fetch_start = Instant::now();
-        let token_quotes = match quoter.fetch_all_quotes(
-            client.clone(),
-            &tokens,
-            quote_amount,
-        ).await {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("Failed to fetch quotes: {:?}", e);
-                continue;
-            }
-        };
-        let fetch_time = fetch_start.elapsed();
-
-        // Detect opportunities with optimal trade sizing using convex optimization
-        let detect_start = Instant::now();
-        let opportunities = detector.detect_optimal(client.clone(), &token_quotes).await;
-        let detect_time = detect_start.elapsed();
-
-        // Log timing for successful scans
-        let loop_time = loop_start.elapsed();
-        if opportunities.is_empty() {
-            // Log less frequently when no opportunities
-            if loop_time.as_millis() > 50 {
-                debug!(
-                    "Scan: {:?}ms (fetch: {:?}, detect: {:?}) | No opportunities",
-                    loop_time.as_millis(), fetch_time.as_millis(), detect_time.as_millis()
+                info!(
+                    "Received {} opportunities from {} tier",
+                    opportunities.len(),
+                    tier
                 );
-            }
-        } else {
-            info!(
-                "Scan: {:?}ms | Found {} opportunities",
-                loop_time.as_millis(), opportunities.len()
-            );
-        }
 
-        // Process opportunities
-        for opp in opportunities {
-            opp.log();
-            monitor.record_opportunity(&opp).await;
+                // Process opportunities
+                for opp in opportunities {
+                    opp.log();
+                    monitor.record_opportunity(&opp).await;
 
-            // Execute if profitable
-            info!("🎯 Attempting execution...");
+                    // Execute if profitable
+                    info!("🎯 Attempting execution from {} tier...", tier);
 
-            match executor.execute(client.clone(), &opp).await {
-                Ok(result) => {
-                    monitor.record_execution(&result).await;
-                }
-                Err(e) => {
-                    error!("Execution error: {:?}", e);
+                    match executor.execute(client.clone(), &opp).await {
+                        Ok(result) => {
+                            monitor.record_execution(&result).await;
+                        }
+                        Err(e) => {
+                            error!("Execution error: {:?}", e);
+                        }
+                    }
                 }
             }
-        }
-
-        // Warn on slow loops (should be <50ms for Arbitrum)
-        if loop_time > Duration::from_millis(100) {
-            warn!("Slow loop: {:?}", loop_time);
+            None => {
+                error!("Scheduler channel closed unexpectedly");
+                // Try to restart
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if let Some(new_client) = rpc_lb.get_client().await {
+                    if let Err(e) = scheduler.start(new_client).await {
+                        error!("Failed to restart scheduler: {:?}", e);
+                    }
+                }
+            }
         }
     }
 }
