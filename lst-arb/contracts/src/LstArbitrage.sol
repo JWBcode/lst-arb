@@ -2,157 +2,234 @@
 pragma solidity ^0.8.19;
 
 import "./interfaces/IBalancerVault.sol";
-import "./interfaces/ICurve.sol";
-import "./interfaces/IUniswapV3.sol";
 
 /**
- * @title LstArbitrage
- * @notice Zero-capital LST/LRT arbitrage using Balancer flash loans (0% fee)
- * @dev Atomic execution: reverts if profit < minProfit, you only pay gas on success
+ * @title LstArbitrage (Universal Router)
+ * @notice Generic batch executor for zero-capital arbitrage using Balancer flash loans
+ * @dev Executes arbitrary call sequences - works with any DEX on Arbitrum
+ *      (Uniswap, Curve, Balancer, Camelot, Trader Joe, SushiSwap, etc.)
  */
 contract LstArbitrage is IFlashLoanRecipient {
     // ============================================
     // CONSTANTS
     // ============================================
-    
+
     IBalancerVault public constant BALANCER = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
     address public constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1; // Arbitrum WETH
-    
-    // Venue identifiers
-    uint8 public constant VENUE_CURVE = 1;
-    uint8 public constant VENUE_BALANCER = 2;
-    uint8 public constant VENUE_UNISWAP_V3 = 3;
-    uint8 public constant VENUE_MAVERICK = 4;
-    
+
+    // ============================================
+    // TYPES
+    // ============================================
+
+    /**
+     * @notice A single execution step in a batch
+     * @param target Contract address to call
+     * @param callData Encoded function call (selector + params)
+     * @param value ETH value to send with call (0 for most DEX calls)
+     */
+    struct Step {
+        address target;
+        bytes callData;
+        uint256 value;
+    }
+
+    /**
+     * @notice Flash loan parameters
+     * @param tokens Tokens to borrow
+     * @param amounts Amounts to borrow
+     * @param steps Execution steps to run after receiving loan
+     * @param minProfit Minimum profit required (reverts if not met)
+     * @param profitToken Token to measure profit in (usually WETH)
+     */
+    struct FlashLoanParams {
+        address[] tokens;
+        uint256[] amounts;
+        Step[] steps;
+        uint256 minProfit;
+        address profitToken;
+    }
+
     // ============================================
     // STATE
     // ============================================
-    
+
     address public immutable owner;
-    
-    // Venue configurations
-    mapping(address => address) public curvePools;      // LST => Curve pool
-    mapping(address => bytes32) public balancerPoolIds; // LST => Balancer pool ID
-    mapping(address => address) public uniswapPools;    // LST => UniV3 pool
-    mapping(address => uint24) public uniswapFees;      // LST => UniV3 fee tier
-    
+
+    // Approved targets for security (prevent arbitrary calls)
+    mapping(address => bool) public approvedTargets;
+
     // ============================================
     // EVENTS
     // ============================================
-    
-    event ArbitrageExecuted(
-        address indexed lst,
-        uint8 buyVenue,
-        uint8 sellVenue,
-        uint256 amountIn,
-        uint256 profit
-    );
-    
-    event VenueConfigured(address indexed lst, uint8 venue, address pool);
-    
+
+    event BatchExecuted(uint256 stepsExecuted, uint256 gasUsed);
+    event FlashLoanExecuted(address[] tokens, uint256[] amounts, uint256 profit);
+    event TargetApproved(address indexed target, bool approved);
+    event TokenApproved(address indexed token, address indexed spender);
+
     // ============================================
     // ERRORS
     // ============================================
-    
+
     error NotOwner();
     error NotBalancer();
+    error StepFailed(uint256 index, bytes reason);
     error InsufficientProfit(uint256 actual, uint256 required);
-    error InvalidVenue(uint8 venue);
-    error VenueNotConfigured(address lst, uint8 venue);
-    error SwapFailed();
-    
+    error TargetNotApproved(address target);
+    error InvalidParams();
+
     // ============================================
     // CONSTRUCTOR
     // ============================================
-    
+
     constructor() {
         owner = msg.sender;
+
+        // Pre-approve common Arbitrum DEX routers
+        _approveTarget(0xBA12222222228d8Ba445958a75a0704d566BF2C8); // Balancer Vault
+        _approveTarget(0xE592427A0AEce92De3Edee1F18E0157C05861564); // Uniswap V3 Router
+        _approveTarget(0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45); // Uniswap V3 Router 02
+        _approveTarget(0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506); // SushiSwap Router
+        _approveTarget(0xc873fEcbd354f5A56E00E710B90EF4201db2448d); // Camelot Router
+        _approveTarget(0x82aF49447D8a07e3bd95BD0d56f35241523fBab1); // WETH (for wrap/unwrap)
+
+        // Approve Balancer vault for flash loan repayment
+        IERC20(WETH).approve(address(BALANCER), type(uint256).max);
     }
-    
+
     // ============================================
-    // ADMIN FUNCTIONS
+    // MODIFIERS
     // ============================================
-    
+
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
     }
-    
-    function configureCurve(address lst, address pool) external onlyOwner {
-        curvePools[lst] = pool;
-        // Pre-approve max for gas savings
-        IERC20(WETH).approve(pool, type(uint256).max);
-        IERC20(lst).approve(pool, type(uint256).max);
-        emit VenueConfigured(lst, VENUE_CURVE, pool);
-    }
-    
-    function configureBalancer(address lst, bytes32 poolId) external onlyOwner {
-        balancerPoolIds[lst] = poolId;
-        // Approve Balancer vault
-        IERC20(WETH).approve(address(BALANCER), type(uint256).max);
-        IERC20(lst).approve(address(BALANCER), type(uint256).max);
-        emit VenueConfigured(lst, VENUE_BALANCER, address(BALANCER));
-    }
-    
-    function configureUniswapV3(address lst, address pool, uint24 fee) external onlyOwner {
-        uniswapPools[lst] = pool;
-        uniswapFees[lst] = fee;
-        // Approve Uniswap router
-        address router = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
-        IERC20(WETH).approve(router, type(uint256).max);
-        IERC20(lst).approve(router, type(uint256).max);
-        emit VenueConfigured(lst, VENUE_UNISWAP_V3, pool);
-    }
-    
-    function withdraw(address token) external onlyOwner {
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        if (balance > 0) {
-            IERC20(token).transfer(owner, balance);
-        }
-    }
-    
-    function withdrawETH() external onlyOwner {
-        uint256 balance = address(this).balance;
-        if (balance > 0) {
-            payable(owner).transfer(balance);
-        }
-    }
-    
+
     // ============================================
-    // ARBITRAGE EXECUTION
+    // ADMIN FUNCTIONS
     // ============================================
-    
+
     /**
-     * @notice Execute arbitrage with flash loan
-     * @param lst The LST/LRT token to arbitrage
-     * @param amount Amount of WETH to flash loan
-     * @param buyVenue Venue to buy LST (cheaper)
-     * @param sellVenue Venue to sell LST (more expensive)
-     * @param minProfit Minimum profit in WETH (reverts if not met)
+     * @notice Approve a target contract for batch execution
+     * @param target Contract address to approve
+     * @param approved Whether to approve or revoke
      */
-    function executeArb(
-        address lst,
+    function setApprovedTarget(address target, bool approved) external onlyOwner {
+        approvedTargets[target] = approved;
+        emit TargetApproved(target, approved);
+    }
+
+    /**
+     * @notice Approve token spending for a DEX router
+     * @param token Token to approve
+     * @param spender Router/contract to approve
+     */
+    function approveToken(address token, address spender) external onlyOwner {
+        IERC20(token).approve(spender, type(uint256).max);
+        emit TokenApproved(token, spender);
+    }
+
+    /**
+     * @notice Batch approve multiple tokens for a spender
+     * @param tokens Array of tokens to approve
+     * @param spender Router/contract to approve
+     */
+    function batchApproveTokens(address[] calldata tokens, address spender) external onlyOwner {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            IERC20(tokens[i]).approve(spender, type(uint256).max);
+            emit TokenApproved(tokens[i], spender);
+        }
+    }
+
+    /**
+     * @notice Withdraw tokens to owner
+     * @param token Token address (use address(0) for ETH)
+     */
+    function withdraw(address token) external onlyOwner {
+        if (token == address(0)) {
+            uint256 balance = address(this).balance;
+            if (balance > 0) {
+                payable(owner).transfer(balance);
+            }
+        } else {
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance > 0) {
+                IERC20(token).transfer(owner, balance);
+            }
+        }
+    }
+
+    // ============================================
+    // BATCH EXECUTION (No Flash Loan)
+    // ============================================
+
+    /**
+     * @notice Execute a batch of calls without flash loan
+     * @dev Use this for simple swaps where you have the capital
+     * @param steps Array of execution steps
+     */
+    function executeBatch(Step[] calldata steps) external onlyOwner {
+        uint256 gasStart = gasleft();
+
+        _executeSteps(steps);
+
+        emit BatchExecuted(steps.length, gasStart - gasleft());
+    }
+
+    // ============================================
+    // FLASH LOAN EXECUTION
+    // ============================================
+
+    /**
+     * @notice Execute arbitrage with Balancer flash loan (0% fee)
+     * @param params Flash loan parameters including steps to execute
+     */
+    function executeFlashLoan(FlashLoanParams calldata params) external onlyOwner {
+        if (params.tokens.length == 0 || params.tokens.length != params.amounts.length) {
+            revert InvalidParams();
+        }
+
+        // Encode steps and params for callback
+        bytes memory userData = abi.encode(params.steps, params.minProfit, params.profitToken);
+
+        // Convert to IERC20 array for Balancer
+        IERC20[] memory tokens = new IERC20[](params.tokens.length);
+        for (uint256 i = 0; i < params.tokens.length; i++) {
+            tokens[i] = IERC20(params.tokens[i]);
+        }
+
+        // Request flash loan - callback will execute steps
+        BALANCER.flashLoan(this, tokens, params.amounts, userData);
+    }
+
+    /**
+     * @notice Simplified flash loan for single-token borrows
+     * @param token Token to borrow
+     * @param amount Amount to borrow
+     * @param steps Execution steps
+     * @param minProfit Minimum profit required
+     */
+    function executeFlashLoanSimple(
+        address token,
         uint256 amount,
-        uint8 buyVenue,
-        uint8 sellVenue,
+        Step[] calldata steps,
         uint256 minProfit
     ) external onlyOwner {
-        // Encode params for flash loan callback
-        bytes memory params = abi.encode(lst, buyVenue, sellVenue, minProfit);
-        
-        // Request flash loan from Balancer (0% fee!)
+        bytes memory userData = abi.encode(steps, minProfit, token);
+
         IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(WETH);
-        
+        tokens[0] = IERC20(token);
+
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = amount;
-        
-        BALANCER.flashLoan(this, tokens, amounts, params);
+
+        BALANCER.flashLoan(this, tokens, amounts, userData);
     }
-    
+
     /**
      * @notice Balancer flash loan callback
-     * @dev Called by Balancer after sending us the loan
+     * @dev Called by Balancer after sending the loan
      */
     function receiveFlashLoan(
         IERC20[] memory tokens,
@@ -161,206 +238,110 @@ contract LstArbitrage is IFlashLoanRecipient {
         bytes memory userData
     ) external override {
         if (msg.sender != address(BALANCER)) revert NotBalancer();
-        
-        // Decode params
-        (address lst, uint8 buyVenue, uint8 sellVenue, uint256 minProfit) = 
-            abi.decode(userData, (address, uint8, uint8, uint256));
-        
-        uint256 wethAmount = amounts[0];
-        uint256 balanceBefore = IERC20(WETH).balanceOf(address(this));
-        
-        // Step 1: Buy LST with WETH on cheaper venue
-        uint256 lstReceived = _swap(buyVenue, WETH, lst, wethAmount);
-        
-        // Step 2: Sell LST for WETH on expensive venue
-        uint256 wethReceived = _swap(sellVenue, lst, WETH, lstReceived);
-        
-        // Step 3: Repay flash loan (0% fee on Balancer)
-        IERC20(WETH).transfer(address(BALANCER), wethAmount + feeAmounts[0]);
-        
-        // Step 4: Calculate and verify profit
-        uint256 balanceAfter = IERC20(WETH).balanceOf(address(this));
-        uint256 profit = balanceAfter - (balanceBefore - wethAmount);
-        
+
+        // Decode execution params
+        (Step[] memory steps, uint256 minProfit, address profitToken) =
+            abi.decode(userData, (Step[], uint256, address));
+
+        // Record balance before execution
+        uint256 balanceBefore = IERC20(profitToken).balanceOf(address(this));
+
+        // Execute all steps
+        _executeSteps(steps);
+
+        // Repay flash loan(s)
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 repayAmount = amounts[i] + feeAmounts[i];
+            tokens[i].transfer(address(BALANCER), repayAmount);
+        }
+
+        // Calculate and verify profit
+        uint256 balanceAfter = IERC20(profitToken).balanceOf(address(this));
+
+        // Account for the loan amount that was in our balance during execution
+        uint256 profit;
+        if (profitToken == address(tokens[0])) {
+            // If profit token is the borrowed token, account for loan
+            profit = balanceAfter > balanceBefore ? balanceAfter - balanceBefore : 0;
+        } else {
+            profit = balanceAfter - balanceBefore;
+        }
+
         // ATOMIC REVERT if profit insufficient
         if (profit < minProfit) revert InsufficientProfit(profit, minProfit);
-        
-        emit ArbitrageExecuted(lst, buyVenue, sellVenue, wethAmount, profit);
+
+        emit FlashLoanExecuted(_toAddresses(tokens), amounts, profit);
     }
-    
+
     // ============================================
-    // INTERNAL SWAP FUNCTIONS
+    // INTERNAL FUNCTIONS
     // ============================================
-    
-    function _swap(
-        uint8 venue,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal returns (uint256 amountOut) {
-        if (venue == VENUE_CURVE) {
-            return _swapCurve(tokenIn, tokenOut, amountIn);
-        } else if (venue == VENUE_BALANCER) {
-            return _swapBalancer(tokenIn, tokenOut, amountIn);
-        } else if (venue == VENUE_UNISWAP_V3) {
-            return _swapUniswapV3(tokenIn, tokenOut, amountIn);
-        } else {
-            revert InvalidVenue(venue);
-        }
-    }
-    
-    function _swapCurve(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal returns (uint256) {
-        // Determine which token is the LST
-        address lst = tokenIn == WETH ? tokenOut : tokenIn;
-        address pool = curvePools[lst];
-        if (pool == address(0)) revert VenueNotConfigured(lst, VENUE_CURVE);
-        
-        ICurvePool curve = ICurvePool(pool);
-        
-        // Curve stETH/ETH pool: index 0 = ETH, index 1 = stETH
-        // Other pools may vary - we detect based on coins
-        int128 i;
-        int128 j;
-        
-        if (tokenIn == WETH) {
-            i = 0; j = 1;
-        } else {
-            i = 1; j = 0;
-        }
-        
-        // For ETH-based pools, need to handle WETH wrapping
-        if (tokenIn == WETH) {
-            // Unwrap WETH to ETH for Curve
-            IWETH(WETH).withdraw(amountIn);
-            return curve.exchange{value: amountIn}(i, j, amountIn, 0);
-        } else {
-            uint256 balBefore = address(this).balance;
-            curve.exchange(i, j, amountIn, 0);
-            uint256 received = address(this).balance - balBefore;
-            // Wrap ETH to WETH
-            IWETH(WETH).deposit{value: received}();
-            return received;
-        }
-    }
-    
-    function _swapBalancer(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal returns (uint256) {
-        address lst = tokenIn == WETH ? tokenOut : tokenIn;
-        bytes32 poolId = balancerPoolIds[lst];
-        if (poolId == bytes32(0)) revert VenueNotConfigured(lst, VENUE_BALANCER);
-        
-        IBalancerVault.SingleSwap memory swap = IBalancerVault.SingleSwap({
-            poolId: poolId,
-            kind: IBalancerVault.SwapKind.GIVEN_IN,
-            assetIn: IAsset(tokenIn),
-            assetOut: IAsset(tokenOut),
-            amount: amountIn,
-            userData: ""
-        });
-        
-        IBalancerVault.FundManagement memory funds = IBalancerVault.FundManagement({
-            sender: address(this),
-            fromInternalBalance: false,
-            recipient: payable(address(this)),
-            toInternalBalance: false
-        });
-        
-        return BALANCER.swap(swap, funds, 0, block.timestamp);
-    }
-    
-    function _swapUniswapV3(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal returns (uint256) {
-        address lst = tokenIn == WETH ? tokenOut : tokenIn;
-        uint24 fee = uniswapFees[lst];
-        if (fee == 0) revert VenueNotConfigured(lst, VENUE_UNISWAP_V3);
-        
-        ISwapRouter router = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
-        
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            fee: fee,
-            recipient: address(this),
-            deadline: block.timestamp,
-            amountIn: amountIn,
-            amountOutMinimum: 0,
-            sqrtPriceLimitX96: 0
-        });
-        
-        return router.exactInputSingle(params);
-    }
-    
-    // ============================================
-    // VIEW FUNCTIONS (for simulation)
-    // ============================================
-    
+
     /**
-     * @notice Simulate arbitrage without executing
-     * @dev Used by bot to verify profitability before sending tx
+     * @notice Execute an array of steps
+     * @param steps Array of execution steps
      */
-    function simulateArb(
-        address lst,
-        uint256 amount,
-        uint8 buyVenue,
-        uint8 sellVenue
-    ) external returns (uint256 expectedProfit) {
-        // This will revert on-chain but eth_call will return the value
-        // Encode and decode to get the expected output
-        
-        uint256 balanceBefore = IERC20(WETH).balanceOf(address(this));
-        
-        // Simulate buy
-        uint256 lstAmount = _getQuote(buyVenue, WETH, lst, amount);
-        
-        // Simulate sell
-        uint256 wethOut = _getQuote(sellVenue, lst, WETH, lstAmount);
-        
-        if (wethOut > amount) {
-            expectedProfit = wethOut - amount;
-        } else {
-            expectedProfit = 0;
+    function _executeSteps(Step[] memory steps) internal {
+        for (uint256 i = 0; i < steps.length; i++) {
+            Step memory step = steps[i];
+
+            // Security: only allow calls to approved targets
+            if (!approvedTargets[step.target]) revert TargetNotApproved(step.target);
+
+            // Execute the call
+            (bool success, bytes memory result) = step.target.call{value: step.value}(step.callData);
+
+            if (!success) {
+                revert StepFailed(i, result);
+            }
         }
     }
-    
-    function _getQuote(
-        uint8 venue,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal view returns (uint256) {
-        if (venue == VENUE_CURVE) {
-            address lst = tokenIn == WETH ? tokenOut : tokenIn;
-            address pool = curvePools[lst];
-            int128 i = tokenIn == WETH ? int128(0) : int128(1);
-            int128 j = tokenIn == WETH ? int128(1) : int128(0);
-            return ICurvePool(pool).get_dy(i, j, amountIn);
-        } else if (venue == VENUE_UNISWAP_V3) {
-            // For UniV3, we need to use the quoter contract
-            // This is simplified - real impl uses quoter
-            revert("Use Quoter for UniV3");
-        }
-        return 0;
+
+    /**
+     * @notice Internal function to approve a target
+     */
+    function _approveTarget(address target) internal {
+        approvedTargets[target] = true;
     }
-    
+
+    /**
+     * @notice Convert IERC20 array to address array for events
+     */
+    function _toAddresses(IERC20[] memory tokens) internal pure returns (address[] memory) {
+        address[] memory addrs = new address[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            addrs[i] = address(tokens[i]);
+        }
+        return addrs;
+    }
+
+    // ============================================
+    // VIEW FUNCTIONS
+    // ============================================
+
+    /**
+     * @notice Check if a target is approved
+     */
+    function isApprovedTarget(address target) external view returns (bool) {
+        return approvedTargets[target];
+    }
+
+    /**
+     * @notice Get contract's token balance
+     */
+    function getBalance(address token) external view returns (uint256) {
+        return IERC20(token).balanceOf(address(this));
+    }
+
     // ============================================
     // RECEIVE ETH
     // ============================================
-    
+
     receive() external payable {}
 }
 
 // ============================================
-// INTERFACES (inline for simplicity)
+// HELPER INTERFACES
 // ============================================
 
 interface IWETH {
