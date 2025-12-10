@@ -105,27 +105,27 @@ cast send "$CONTRACT_ADDRESS" \
 
 echo "  ✓ Balancer wstETH pool configured"
 
-# Configure weETH on Uniswap V3 (500 fee tier - placeholder, update with actual pool)
+# Configure weETH on Uniswap V3
 cast send "$CONTRACT_ADDRESS" \
     "configureUniswapV3(address,address,uint24)" \
     "$WEETH" \
-    "0x0000000000000000000000000000000000000000" \
+    "0xA169d1aB5c948555954D38700a6cDAA7A4E0c3A0" \
     "500" \
     --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
-echo "  ✓ Uniswap V3 weETH pool configured (placeholder - update with actual pool)"
+echo "  ✓ Uniswap V3 weETH pool configured"
 
-# Configure ezETH on Uniswap V3 (500 fee tier - placeholder, update with actual pool)
+# Configure ezETH on Uniswap V3
 cast send "$CONTRACT_ADDRESS" \
     "configureUniswapV3(address,address,uint24)" \
     "$EZETH" \
-    "0x0000000000000000000000000000000000000000" \
-    "500" \
+    "0x40cc6f68400958bf7225e8a762d3ad41c1064086" \
+    "100" \
     --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
-echo "  ✓ Uniswap V3 ezETH pool configured (placeholder - update with actual pool)"
+echo "  ✓ Uniswap V3 ezETH pool configured"
 
 echo ""
 echo "═══════════════════════════════════════════"
@@ -138,8 +138,7 @@ echo ""
 echo "Next steps:"
 echo "1. Update ARB_CONTRACT in your .env file"
 echo "2. Fund contract with gas (send ETH on Arbitrum)"
-echo "3. Update Uniswap pool addresses for weETH/ezETH"
-echo "4. Start the bot: cargo run --release"
+echo "3. Start the bot: cargo run --release"
 echo ""
 echo "View on Arbiscan: https://arbiscan.io/address/$CONTRACT_ADDRESS"
 echo ""
