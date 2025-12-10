@@ -519,7 +519,7 @@
             <div class="header-right">
                 <div class="network-badge">
                     <div class="network-dot"></div>
-                    <span id="network-name">Sepolia Testnet</span>
+                    <span id="network-name">Arbitrum One</span>
                 </div>
                 <div class="status-indicator">
                     <div class="status-dot idle" id="status-dot"></div>
@@ -641,7 +641,7 @@
                         </div>
                         <div class="wallet-row">
                             <span class="wallet-label">Network</span>
-                            <span class="wallet-value" id="chain-info">Sepolia (11155111)</span>
+                            <span class="wallet-value" id="chain-info">Arbitrum One (42161)</span>
                         </div>
                     </div>
                 </div>
@@ -802,11 +802,11 @@
                 const contractShort = data.contract_address.slice(0, 6) + '...' + data.contract_address.slice(-4);
 
                 const walletLink = document.getElementById('wallet-link');
-                walletLink.href = `https://sepolia.etherscan.io/address/${data.address}`;
+                walletLink.href = `https://arbiscan.io/address/${data.address}`;
                 walletLink.textContent = walletShort;
 
                 const contractLink = document.getElementById('contract-link');
-                contractLink.href = `https://sepolia.etherscan.io/address/${data.contract_address}`;
+                contractLink.href = `https://arbiscan.io/address/${data.contract_address}`;
                 contractLink.textContent = contractShort;
 
             } catch (error) {

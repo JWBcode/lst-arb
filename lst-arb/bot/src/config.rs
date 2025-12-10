@@ -25,15 +25,13 @@ pub struct RpcConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenConfig {
-    // LSTs
-    pub steth: String,
+    // LSTs on Arbitrum (stETH not available on L2)
+    pub wsteth: String,
     pub reth: String,
     pub cbeth: String,
-    pub wsteth: String,
     // LRTs
     pub weeth: String,
     pub ezeth: String,
-    pub rseth: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,27 +86,28 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             rpc: RpcConfig {
+                // Arbitrum One RPC endpoints
                 primary: std::env::var("RPC_URL_PRIMARY")
-                    .unwrap_or_else(|_| "wss://eth-mainnet.g.alchemy.com/v2/demo".into()),
+                    .unwrap_or_else(|_| "https://arb1.arbitrum.io/rpc".into()),
                 backup1: std::env::var("RPC_URL_BACKUP1")
-                    .unwrap_or_else(|_| "wss://eth-mainnet.g.alchemy.com/v2/demo".into()),
+                    .unwrap_or_else(|_| "https://arb1.arbitrum.io/rpc".into()),
                 backup2: std::env::var("RPC_URL_BACKUP2")
-                    .unwrap_or_else(|_| "wss://mainnet.infura.io/ws/v3/demo".into()),
+                    .unwrap_or_else(|_| "https://arbitrum-mainnet.infura.io/v3/demo".into()),
                 health_check_interval_ms: 5000,
                 max_latency_ms: 100,
             },
             tokens: TokenConfig {
-                steth: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84".into(),
-                reth: "0xae78736Cd615f374D3085123A210448E74Fc6393".into(),
-                cbeth: "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704".into(),
-                wsteth: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0".into(),
-                weeth: "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee".into(),
-                ezeth: "0xbf5495Efe5DB9ce00f80364C8B423567e58d2110".into(),
-                rseth: "0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7".into(),
+                // Arbitrum token addresses (stETH not available on L2)
+                wsteth: "0x5979D7b546E38E41137eFe97697CBca551Db098E".into(),
+                reth: "0xEC70Dcb4A1EfA46b8F2D97C310C9c4790bA5ffA8".into(),
+                cbeth: "0x1DEBd73E752bEaF79865Fd6446b0c970EaE7732f".into(),
+                weeth: "0x35751007a407ca6feffe80b3cb397736d2cf4dbe".into(),
+                ezeth: "0x2416092f143378750bb29b79ed961ab195cceea5".into(),
             },
             venues: VenueConfig {
-                curve_steth_pool: "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022".into(),
-                curve_reth_pool: "0x0f3159811670c117c372428D4E69AC32325e4D0F".into(),
+                // Arbitrum venue addresses
+                curve_steth_pool: "0x6eB2dc694eB516B16Dc9d7671f465248B71E9091".into(), // wstETH/ETH NG Pool
+                curve_reth_pool: "0x0000000000000000000000000000000000000000".into(), // Low liquidity on Arb
                 balancer_vault: "0xBA12222222228d8Ba445958a75a0704d566BF2C8".into(),
                 uniswap_quoter: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e".into(),
                 uniswap_router: "0xE592427A0AEce92De3Edee1F18E0157C05861564".into(),
@@ -116,21 +115,22 @@ impl Default for Config {
             },
             strategy: StrategyConfig {
                 min_spread_bps: 20,
-                min_profit_wei: "10000000000000000".into(), // 0.01 ETH
-                max_trade_size_eth: 10.0,
+                min_profit_wei: "1000000000000000".into(), // 0.001 ETH for low-capital L2 operation
+                max_trade_size_eth: 0.5, // Reduced for <$200 capital
                 poll_interval_ms: 200,
                 enabled_tokens: vec![
-                    "steth".into(),
-                    "reth".into(), 
+                    "wsteth".into(),
+                    "reth".into(),
                     "weeth".into(),
                     "ezeth".into(),
                 ],
             },
             execution: ExecutionConfig {
-                use_flashbots: true,
-                flashbots_relay: "https://relay.flashbots.net".into(),
-                max_gas_price_gwei: 100,
-                max_priority_fee_gwei: 50,
+                // Arbitrum uses FIFO sequencer - no Flashbots
+                use_flashbots: false,
+                flashbots_relay: "".into(),
+                max_gas_price_gwei: 2, // Arbitrum L2 gas is typically 0.1 gwei
+                max_priority_fee_gwei: 0,
                 gas_buffer_percent: 20,
                 arb_contract: std::env::var("ARB_CONTRACT").unwrap_or_default(),
             },
@@ -168,16 +168,16 @@ pub struct ParsedVenues {
 impl ParsedConfig {
     pub fn from_config(config: &Config) -> eyre::Result<Self> {
         let mut tokens = HashMap::new();
-        tokens.insert("steth".into(), config.tokens.steth.parse()?);
+        // Arbitrum token addresses (stETH not available on L2)
+        tokens.insert("wsteth".into(), config.tokens.wsteth.parse()?);
         tokens.insert("reth".into(), config.tokens.reth.parse()?);
         tokens.insert("cbeth".into(), config.tokens.cbeth.parse()?);
-        tokens.insert("wsteth".into(), config.tokens.wsteth.parse()?);
         tokens.insert("weeth".into(), config.tokens.weeth.parse()?);
         tokens.insert("ezeth".into(), config.tokens.ezeth.parse()?);
-        tokens.insert("rseth".into(), config.tokens.rseth.parse()?);
-        
+
         Ok(ParsedConfig {
-            weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse()?,
+            // Arbitrum WETH address
+            weth: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".parse()?,
             tokens,
             venues: ParsedVenues {
                 curve_steth: config.venues.curve_steth_pool.parse()?,

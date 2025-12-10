@@ -11,29 +11,27 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION - Arbitrum One
 # =============================================================================
 
-RPC_URL = "https://eth-mainnet.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
+RPC_URL = "https://arb1.arbitrum.io/rpc"
 
-# 0x API Configuration
+# 0x API Configuration - Arbitrum
 ZERO_EX_API_KEY = "c09b957e-9f63-4147-9f20-1fcf992eeb6c"
-ZERO_EX_API_URL = "https://api.0x.org/swap/v1"
+ZERO_EX_API_URL = "https://arbitrum.api.0x.org/swap/v1"
+CHAIN_ID = 42161
 
 # User-Agent to bypass Cloudflare bot detection
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
-# Tokens
-WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+# Tokens - Arbitrum One addresses (stETH not available on L2)
+WETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 TOKENS = {
-    "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
-    "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
-    "ezETH": "0xbf5495Efe5DB9ce00f80364C8B423567e58d2110",
-    "rETH": "0xae78736Cd615f374D3085123A210448E74Fc6393",
-    "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
-    "weETH": "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee",
-    "cbETH": "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704",
-    "rsETH": "0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7",
+    "wstETH": "0x5979D7b546E38E41137eFe97697CBca551Db098E",
+    "rETH": "0xEC70Dcb4A1EfA46b8F2D97C310C9c4790bA5ffA8",
+    "cbETH": "0x1DEBd73E752bEaF79865Fd6446b0c970EaE7732f",
+    "weETH": "0x35751007a407ca6feffe80b3cb397736d2cf4dbe",
+    "ezETH": "0x2416092f143378750bb29b79ed961ab195cceea5",
 }
 
 # =============================================================================
@@ -41,8 +39,8 @@ TOKENS = {
 # =============================================================================
 
 MIN_SPREAD_BPS = 5
-TRADE_SIZES_ETH = [1, 5, 10, 25]
-GAS_COST_ETH = 0.003
+TRADE_SIZES_ETH = [0.1, 0.25, 0.5]  # Reduced for <$200 capital on L2
+GAS_COST_ETH = 0.0001  # Arbitrum L2 gas is much cheaper
 
 
 # =============================================================================
@@ -254,15 +252,16 @@ def find_arbitrage(quotes: List[PoolQuote], trade_size: float) -> List[Opportuni
 
 def print_header():
     print("\n" + "=" * 75)
-    print("  LST/LRT ARBITRAGE SCANNER - 0x API INTEGRATION")
+    print("  LST/LRT ARBITRAGE SCANNER - ARBITRUM ONE")
     print("=" * 75)
+    print("  Network: Arbitrum One (Chain ID: 42161)")
     print("  Data Source: 0x Protocol (DEX Aggregator)")
-    print("  Aggregates: Uniswap V3, Balancer, Curve, Maverick, SushiSwap, etc.")
+    print("  Aggregates: Uniswap V3, Balancer, Curve, Camelot, SushiSwap, etc.")
     print("=" * 75)
     print("  Tokens:")
     print(f"    {', '.join(TOKENS.keys())}")
     print("=" * 75)
-    print(f"  Min Spread: {MIN_SPREAD_BPS} bps | Gas Est: {GAS_COST_ETH} ETH")
+    print(f"  Min Spread: {MIN_SPREAD_BPS} bps | Gas Est: {GAS_COST_ETH} ETH (L2)")
     print("=" * 75 + "\n")
 
 
