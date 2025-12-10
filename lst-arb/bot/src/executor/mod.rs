@@ -36,6 +36,20 @@ pub enum ExecutionResult {
     Confirmed { hash: H256, profit: U256 },
     Reverted { hash: H256, reason: String },
     Failed { reason: String },
+    /// Transaction aborted due to pre-flight check failure
+    /// (price moved too much during the detection-to-execution window)
+    Aborted { expected_profit: U256, actual_profit: U256 },
+}
+
+/// Result of pre-flight execution integrity verification
+#[derive(Debug, Clone)]
+enum VerificationResult {
+    /// Verification passed, profit is acceptable
+    Passed { actual_profit: U256 },
+    /// Profit degraded by more than 10%
+    ProfitDegraded { expected: U256, actual: U256 },
+    /// Simulation reverted (conditions changed)
+    SimulationReverted { reason: String },
 }
 
 impl Executor {
@@ -123,15 +137,107 @@ impl Executor {
             U256::from(nonce),
         );
 
-        // Step 5: Sign transaction
+        // Step 5: Pre-flight verification
+        // Verify execution integrity IMMEDIATELY before submission
+        // This catches price movements during the ~50ms detection-to-execution window
+        match self.verify_execution_integrity(
+            client.clone(),
+            opportunity,
+            sim_result.net_profit,
+        ).await {
+            Ok(VerificationResult::Passed { actual_profit }) => {
+                info!(
+                    "✅ Pre-flight check passed. Expected: {} ETH, Actual: {} ETH",
+                    ethers::utils::format_ether(sim_result.net_profit),
+                    ethers::utils::format_ether(actual_profit)
+                );
+            }
+            Ok(VerificationResult::ProfitDegraded { expected, actual }) => {
+                warn!(
+                    "⚠️ Pre-flight check failed. Expected {} ETH, got {} ETH. Saving gas.",
+                    ethers::utils::format_ether(expected),
+                    ethers::utils::format_ether(actual)
+                );
+                return Ok(ExecutionResult::Aborted {
+                    expected_profit: expected,
+                    actual_profit: actual,
+                });
+            }
+            Ok(VerificationResult::SimulationReverted { reason }) => {
+                warn!(
+                    "⚠️ Pre-flight check failed. Simulation reverted: {}. Saving gas.",
+                    reason
+                );
+                return Ok(ExecutionResult::Aborted {
+                    expected_profit: sim_result.net_profit,
+                    actual_profit: U256::zero(),
+                });
+            }
+            Err(e) => {
+                // On verification error, be conservative and abort
+                warn!("⚠️ Pre-flight verification error: {:?}. Aborting.", e);
+                return Ok(ExecutionResult::Aborted {
+                    expected_profit: sim_result.net_profit,
+                    actual_profit: U256::zero(),
+                });
+            }
+        }
+
+        // Step 6: Sign transaction
         let signature = self.wallet.sign_transaction(&tx).await?;
         let signed_tx = tx.rlp_signed(&signature);
 
-        // Step 6: Submit directly (Flashbots not available on Arbitrum)
+        // Step 7: Submit directly (Flashbots not available on Arbitrum)
         // Arbitrum uses FIFO ordering, so direct submission is optimal
         self.submit_direct(client.clone(), &signed_tx, opportunity).await
     }
-    
+
+    /// Verify execution integrity immediately before submission
+    ///
+    /// Performs a fresh simulation against the latest block to catch price movements
+    /// during the detection-to-execution window (~50ms on Arbitrum).
+    ///
+    /// Aborts if:
+    /// - Actual profit < 90% of expected profit (price moved >10%)
+    /// - Simulation reverts (conditions changed)
+    async fn verify_execution_integrity(
+        &self,
+        client: Arc<WsClient>,
+        opportunity: &Opportunity,
+        expected_profit: U256,
+    ) -> eyre::Result<VerificationResult> {
+        // Simulate against the latest block
+        let gas_price = client.get_gas_price().await?;
+
+        let sim_result = self.simulator.simulate(
+            client.clone(),
+            opportunity,
+            gas_price,
+        ).await?;
+
+        // Check if simulation reverted
+        if !sim_result.success {
+            return Ok(VerificationResult::SimulationReverted {
+                reason: sim_result.revert_reason.unwrap_or_else(|| "Unknown".to_string()),
+            });
+        }
+
+        let actual_profit = sim_result.net_profit;
+
+        // Check if profit degraded by more than 10%
+        // Formula: actual_profit < expected_profit * 0.90
+        let min_acceptable_profit = expected_profit * 90 / 100;
+
+        if actual_profit < min_acceptable_profit {
+            return Ok(VerificationResult::ProfitDegraded {
+                expected: expected_profit,
+                actual: actual_profit,
+            });
+        }
+
+        Ok(VerificationResult::Passed { actual_profit })
+    }
+
     /// Submit transaction directly to Arbitrum sequencer
     /// Optimized for FIFO ordering - no priority fee bumping needed
     async fn submit_direct(
