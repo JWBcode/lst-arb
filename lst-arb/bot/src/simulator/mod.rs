@@ -1,7 +1,8 @@
 use ethers::prelude::*;
-use ethers::types::{Address, U256, Bytes, TransactionRequest};
+use ethers::types::{Address, U256};
+use ethers::types::transaction::eip2718::TypedTransaction;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::rpc::WsClient;
 use crate::detector::Opportunity;

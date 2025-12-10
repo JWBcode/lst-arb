@@ -1,13 +1,12 @@
 use ethers::prelude::*;
-use ethers::abi::{encode, Token, Tokenize};
 use ethers::types::{Bytes, Address, U256};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::cache::{Quote, Venue};
 use crate::rpc::WsClient;
 
-// Multicall3 ABI
+// Multicall3 ABI - only contract we actually call via abigen
 abigen!(
     Multicall3,
     r#"[
@@ -17,30 +16,8 @@ abigen!(
     ]"#
 );
 
-// Curve Pool ABI
-abigen!(
-    CurvePool,
-    r#"[
-        function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256)
-        function balances(uint256 i) external view returns (uint256)
-    ]"#
-);
-
-// Balancer Vault ABI for queries
-abigen!(
-    BalancerVault,
-    r#"[
-        function queryBatchSwap(uint8 kind, tuple(bytes32 poolId, uint256 assetInIndex, uint256 assetOutIndex, uint256 amount, bytes userData)[] swaps, address[] assets, tuple(address sender, bool fromInternalBalance, address recipient, bool toInternalBalance) funds) external returns (int256[] assetDeltas)
-    ]"#
-);
-
-// UniswapV3 Quoter ABI
-abigen!(
-    UniswapQuoter,
-    r#"[
-        function quoteExactInputSingle(tuple(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
-    ]"#
-);
+// Note: Curve, Balancer, and Uniswap calls are manually encoded below
+// to avoid abigen tuple parsing issues
 
 #[derive(Debug, Clone)]
 pub struct VenueAddresses {
@@ -174,8 +151,9 @@ impl MulticallQuoter {
         
         for (idx, token, venue, is_buy) in &call_mapping {
             if let Some(result) = results.get(*idx) {
-                if result.success && !result.return_data.is_empty() {
-                    if let Ok(amount_out) = self.decode_quote_result(&result.return_data, *venue) {
+                // result is a tuple (success: bool, returnData: Bytes)
+                if result.0 && !result.1.is_empty() {
+                    if let Ok(amount_out) = self.decode_quote_result(&result.1, *venue) {
                         let key = (*token, *venue);
                         let entry = venue_quotes.entry(key).or_insert((U256::zero(), U256::zero()));
                         
