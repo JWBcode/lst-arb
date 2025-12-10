@@ -49,7 +49,7 @@ async fn main() -> eyre::Result<()> {
     info!("Configuration loaded");
     info!("  Min spread: {}bps", parsed.min_spread_bps);
     info!("  Min profit: {} ETH", ethers::utils::format_ether(parsed.min_profit));
-    info!("  Max trade:  {} ETH", ethers::utils::format_ether(parsed.max_trade_size));
+    info!("  Trade sizing: Convex optimization with 90% liquidity clamping");
     
     // Initialize RPC load balancer
     let rpc_lb = Arc::new(RpcLoadBalancer::new(
@@ -83,7 +83,6 @@ async fn main() -> eyre::Result<()> {
     let detector = Arc::new(OpportunityDetector::new(
         parsed.min_spread_bps,
         parsed.min_profit,
-        parsed.max_trade_size,
     ));
     
     let client = rpc_lb.get_client().await
@@ -113,12 +112,12 @@ async fn main() -> eyre::Result<()> {
         })
         .collect();
     
-    info!("Monitoring {} tokens: {:?}", tokens.len(), 
+    info!("Monitoring {} tokens: {:?}", tokens.len(),
         tokens.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>());
-    
-    // Trade amount (default 5 ETH)
-    let trade_amount = ethers::utils::parse_ether("5.0")?;
-    
+
+    // Quote amount for price discovery (actual trade size determined by solver)
+    let quote_amount = ethers::utils::parse_ether("1.0")?;
+
     info!("═══════════════════════════════════════════");
     info!("Starting main loop ({}ms interval)", config.strategy.poll_interval_ms);
     info!("═══════════════════════════════════════════");
@@ -182,7 +181,7 @@ async fn main() -> eyre::Result<()> {
         let token_quotes = match quoter.fetch_all_quotes(
             client.clone(),
             &tokens,
-            trade_amount,
+            quote_amount,
         ).await {
             Ok(q) => q,
             Err(e) => {
@@ -191,10 +190,10 @@ async fn main() -> eyre::Result<()> {
             }
         };
         let fetch_time = fetch_start.elapsed();
-        
-        // Update cache and detect opportunities
+
+        // Detect opportunities with optimal trade sizing using convex optimization
         let detect_start = Instant::now();
-        let opportunities = detector.detect(&token_quotes, trade_amount);
+        let opportunities = detector.detect_optimal(client.clone(), &token_quotes).await;
         let detect_time = detect_start.elapsed();
         
         // Log timing

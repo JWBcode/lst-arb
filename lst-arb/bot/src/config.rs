@@ -48,7 +48,7 @@ pub struct VenueConfig {
 pub struct StrategyConfig {
     pub min_spread_bps: u64,
     pub min_profit_wei: String,
-    pub max_trade_size_eth: f64,
+    // max_trade_size_eth removed - now determined by convex optimization solver
     pub poll_interval_ms: u64,
     pub enabled_tokens: Vec<String>,
 }
@@ -116,7 +116,7 @@ impl Default for Config {
             strategy: StrategyConfig {
                 min_spread_bps: 20,
                 min_profit_wei: "1000000000000000".into(), // 0.001 ETH for low-capital L2 operation
-                max_trade_size_eth: 0.5, // Reduced for <$200 capital
+                // Trade size determined by convex optimization solver with 90% liquidity clamping
                 poll_interval_ms: 200,
                 enabled_tokens: vec![
                     "wsteth".into(),
@@ -152,7 +152,7 @@ pub struct ParsedConfig {
     pub arb_contract: Address,
     pub min_spread_bps: u64,
     pub min_profit: U256,
-    pub max_trade_size: U256,
+    // max_trade_size removed - determined by convex optimization solver
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +190,7 @@ impl ParsedConfig {
             arb_contract: config.execution.arb_contract.parse().unwrap_or(Address::zero()),
             min_spread_bps: config.strategy.min_spread_bps,
             min_profit: U256::from_dec_str(&config.strategy.min_profit_wei)?,
-            max_trade_size: ethers::utils::parse_ether(config.strategy.max_trade_size_eth)?,
+            // max_trade_size removed - determined by convex optimization solver
         })
     }
 }
