@@ -24,8 +24,8 @@ pub const MAX_LIQUIDITY_PERCENT: u64 = 90;
 // Minimum trade size (0.01 ETH)
 pub const MIN_TRADE_SIZE_WEI: u64 = 10_000_000_000_000_000;
 
-// Maximum iterations for Newton-Raphson
-pub const MAX_ITERATIONS: u32 = 50;
+// Maximum iterations for Newton-Raphson (hard limit for speed on L2)
+pub const MAX_ITERATIONS: u32 = 5;
 
 // Convergence threshold (0.1% relative change)
 pub const CONVERGENCE_THRESHOLD: f64 = 0.001;
@@ -100,6 +100,9 @@ impl Solver {
 
     /// Calculate optimal trade size for Constant Product AMM (Uniswap V2/V3)
     ///
+    /// Uses closed-form algebraic solution for O(1) execution time.
+    /// Formula: x_opt = (sqrt(reserve_in * reserve_out * fee_bps) - reserve_in) / (1 - fee_bps)
+    ///
     /// For Constant Product: x * y = k
     /// Output for input dx: dy = y * dx / (x + dx)
     ///
@@ -107,6 +110,7 @@ impl Solver {
     /// where sell_output = sell(buy(dx))
     ///
     /// P'(dx) = 0 gives optimal input
+    #[inline(always)]
     pub fn optimal_constant_product(
         &self,
         buy_pool: &PoolParams,
@@ -168,7 +172,10 @@ impl Solver {
     ///
     /// StableSwap invariant: A * n^n * sum(x_i) + D = A * D * n^n + D^(n+1) / (n^n * prod(x_i))
     ///
-    /// Uses Newton-Raphson iteration to find optimal x where P'(x) = 0
+    /// Uses Newton-Raphson approximation with HARD LIMIT of 5 iterations for L2 speed.
+    /// If convergence isn't reached in 5 steps, returns current best estimate immediately.
+    /// Speed is more important than the 18th decimal of precision.
+    #[inline(always)]
     pub fn optimal_stableswap(
         &self,
         buy_pool: &PoolParams,
@@ -569,5 +576,68 @@ mod tests {
         // Should be 90% of 50 = 45 ETH
         let expected = ethers::utils::parse_ether("45.0").unwrap();
         assert_eq!(clamped, expected);
+    }
+
+    #[test]
+    fn test_solver_speed() {
+        use std::time::Instant;
+
+        let solver = Solver::new();
+
+        // Set up test pools for constant product (Uniswap V3)
+        let buy_pool = PoolParams {
+            venue: Venue::UniswapV3,
+            reserve_x: ethers::utils::parse_ether("1000.0").unwrap(),
+            reserve_y: ethers::utils::parse_ether("950.0").unwrap(),
+            fee_bps: 30,
+            amp: None,
+        };
+
+        let sell_pool = PoolParams {
+            venue: Venue::Balancer,
+            reserve_x: ethers::utils::parse_ether("500.0").unwrap(),
+            reserve_y: ethers::utils::parse_ether("480.0").unwrap(),
+            fee_bps: 30,
+            amp: None,
+        };
+
+        // Benchmark constant product solver (should be O(1) closed-form)
+        let start = Instant::now();
+        for _ in 0..1000 {
+            let _ = solver.optimal_constant_product(&buy_pool, &sell_pool);
+        }
+        let elapsed = start.elapsed();
+        let avg_micros = elapsed.as_micros() / 1000;
+
+        println!("Constant product solver: {} microseconds average", avg_micros);
+        assert!(avg_micros < 10, "Constant product solver too slow: {} us (max 10 us)", avg_micros);
+
+        // Set up test pools for stableswap (Curve)
+        let curve_buy = PoolParams {
+            venue: Venue::Curve,
+            reserve_x: ethers::utils::parse_ether("10000.0").unwrap(),
+            reserve_y: ethers::utils::parse_ether("9800.0").unwrap(),
+            fee_bps: 4, // 0.04%
+            amp: Some(100),
+        };
+
+        let curve_sell = PoolParams {
+            venue: Venue::Curve,
+            reserve_x: ethers::utils::parse_ether("5000.0").unwrap(),
+            reserve_y: ethers::utils::parse_ether("5100.0").unwrap(),
+            fee_bps: 4,
+            amp: Some(100),
+        };
+
+        // Benchmark stableswap solver (Newton-Raphson with max 5 iterations)
+        let start = Instant::now();
+        for _ in 0..1000 {
+            let _ = solver.optimal_stableswap(&curve_buy, &curve_sell);
+        }
+        let elapsed = start.elapsed();
+        let avg_micros = elapsed.as_micros() / 1000;
+
+        println!("Stableswap solver: {} microseconds average", avg_micros);
+        assert!(avg_micros < 10, "Stableswap solver too slow: {} us (max 10 us)", avg_micros);
     }
 }

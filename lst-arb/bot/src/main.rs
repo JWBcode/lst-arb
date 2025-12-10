@@ -18,6 +18,8 @@ mod simulator;
 mod executor;
 mod monitor;
 mod watcher;
+mod scout;
+mod scheduler;
 
 use config::{Config, ParsedConfig};
 use rpc::RpcLoadBalancer;

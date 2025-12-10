@@ -97,6 +97,13 @@ impl Monitor {
             ExecutionResult::Failed { reason } => {
                 warn!("TX Failed: {}", reason);
             }
+            ExecutionResult::Aborted { expected_profit, actual_profit } => {
+                info!(
+                    "⏸️ TX Aborted (pre-flight check). Expected: {} ETH, Actual: {} ETH. Gas saved.",
+                    ethers::utils::format_ether(*expected_profit),
+                    ethers::utils::format_ether(*actual_profit)
+                );
+            }
         }
     }
     
