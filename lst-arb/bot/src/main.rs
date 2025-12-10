@@ -17,6 +17,7 @@ mod detector;
 mod simulator;
 mod executor;
 mod monitor;
+mod scout;
 mod watcher;
 
 use config::{Config, ParsedConfig};

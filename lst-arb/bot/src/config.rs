@@ -1,8 +1,10 @@
 use ethers::types::{Address, U256};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -192,5 +194,151 @@ impl ParsedConfig {
             min_profit: U256::from_dec_str(&config.strategy.min_profit_wei)?,
             // max_trade_size removed - determined by convex optimization solver
         })
+    }
+}
+
+/// Represents a dynamically discovered token
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Token {
+    /// Unique identifier/name for the token
+    pub name: String,
+    /// Token contract address
+    pub address: Address,
+    /// Token symbol (e.g., "WETH", "USDC")
+    pub symbol: String,
+    /// Number of decimals
+    pub decimals: u8,
+    /// Whether this token has been verified as safe
+    pub verified: bool,
+}
+
+impl Token {
+    /// Create a new token
+    pub fn new(name: String, address: Address, symbol: String, decimals: u8) -> Self {
+        Self {
+            name,
+            address,
+            symbol,
+            decimals,
+            verified: false,
+        }
+    }
+
+    /// Mark token as verified safe
+    pub fn mark_verified(&mut self) {
+        self.verified = true;
+    }
+}
+
+/// Runtime configuration that supports dynamic updates via RwLock
+///
+/// This struct wraps configuration values that can be safely updated
+/// at runtime without restarting the bot.
+pub struct RuntimeConfig {
+    /// Active token list protected by RwLock for concurrent access
+    tokens: RwLock<Vec<Token>>,
+    /// Parsed static configuration
+    pub parsed: ParsedConfig,
+}
+
+impl RuntimeConfig {
+    /// Create a new RuntimeConfig from a ParsedConfig
+    pub fn new(parsed: ParsedConfig) -> Self {
+        // Initialize with tokens from parsed config
+        let initial_tokens: Vec<Token> = parsed.tokens.iter()
+            .map(|(name, address)| Token {
+                name: name.clone(),
+                address: *address,
+                symbol: name.to_uppercase(),
+                decimals: 18, // Default for most LSTs
+                verified: true, // Pre-configured tokens are assumed verified
+            })
+            .collect();
+
+        Self {
+            tokens: RwLock::new(initial_tokens),
+            parsed,
+        }
+    }
+
+    /// Safely update the active token list at runtime
+    ///
+    /// This method acquires a write lock and atomically swaps the token list.
+    /// Any pending operations using the old list will complete with their
+    /// existing references before the new list takes effect.
+    ///
+    /// # Arguments
+    /// * `new_tokens` - The new list of tokens to use
+    ///
+    /// # Example
+    /// ```ignore
+    /// let runtime_config = RuntimeConfig::new(parsed_config);
+    /// let new_tokens = vec![
+    ///     Token::new("weth".into(), weth_addr, "WETH".into(), 18),
+    ///     Token::new("usdc".into(), usdc_addr, "USDC".into(), 6),
+    /// ];
+    /// runtime_config.update_tokens(new_tokens).await;
+    /// ```
+    pub async fn update_tokens(&self, new_tokens: Vec<Token>) {
+        let mut tokens = self.tokens.write().await;
+        let old_count = tokens.len();
+        let new_count = new_tokens.len();
+        *tokens = new_tokens;
+        tracing::info!(
+            "Token list updated: {} -> {} tokens",
+            old_count,
+            new_count
+        );
+    }
+
+    /// Get a read-only snapshot of the current token list
+    pub async fn get_tokens(&self) -> Vec<Token> {
+        let tokens = self.tokens.read().await;
+        tokens.clone()
+    }
+
+    /// Get tokens as (Address, String) pairs for compatibility with existing code
+    pub async fn get_token_pairs(&self) -> Vec<(Address, String)> {
+        let tokens = self.tokens.read().await;
+        tokens.iter()
+            .filter(|t| t.verified)
+            .map(|t| (t.address, t.name.clone()))
+            .collect()
+    }
+
+    /// Add a single token to the list
+    pub async fn add_token(&self, token: Token) {
+        let mut tokens = self.tokens.write().await;
+        // Check if token already exists
+        if !tokens.iter().any(|t| t.address == token.address) {
+            tracing::info!(
+                "Adding new token: {} ({:?})",
+                token.symbol,
+                token.address
+            );
+            tokens.push(token);
+        }
+    }
+
+    /// Remove a token by address
+    pub async fn remove_token(&self, address: Address) {
+        let mut tokens = self.tokens.write().await;
+        let initial_len = tokens.len();
+        tokens.retain(|t| t.address != address);
+        if tokens.len() < initial_len {
+            tracing::info!("Removed token: {:?}", address);
+        }
+    }
+
+    /// Check if a token exists in the list
+    pub async fn has_token(&self, address: Address) -> bool {
+        let tokens = self.tokens.read().await;
+        tokens.iter().any(|t| t.address == address)
+    }
+
+    /// Get token count
+    pub async fn token_count(&self) -> usize {
+        let tokens = self.tokens.read().await;
+        tokens.len()
     }
 }
