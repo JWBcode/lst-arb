@@ -65,81 +65,88 @@ impl Executor {
     }
     
     /// Execute an arbitrage opportunity
+    /// Optimized for Arbitrum's FIFO sequencer (no MEV, no priority fees)
     pub async fn execute(
         &self,
         client: Arc<WsClient>,
         opportunity: &Opportunity,
     ) -> eyre::Result<ExecutionResult> {
         // Step 1: Get current gas price
-        let base_fee = client.get_gas_price().await?;
-        let gas_price = base_fee + self.max_priority_fee;
-        
+        // On Arbitrum, the RPC estimate includes L1 data fee, so we trust it
+        let gas_price = client.get_gas_price().await?;
+
+        // On Arbitrum L2, gas prices are typically very low (0.1 gwei)
+        // No need to add priority fee - sequencer uses FIFO ordering
         if gas_price > self.max_gas_price {
             return Ok(ExecutionResult::Failed {
                 reason: format!("Gas price too high: {} > {}", gas_price, self.max_gas_price),
             });
         }
-        
+
         // Step 2: Simulate
         let sim_result = self.simulator.simulate(
             client.clone(),
             opportunity,
             gas_price,
         ).await?;
-        
+
         if !sim_result.success {
             return Ok(ExecutionResult::Failed {
                 reason: sim_result.revert_reason.unwrap_or_else(|| "Simulation failed".into()),
             });
         }
-        
+
         // Step 3: Check profitability after gas
         if sim_result.net_profit.is_zero() {
             return Ok(ExecutionResult::Failed {
                 reason: "Not profitable after gas".into(),
             });
         }
-        
+
         // Step 4: Build transaction
         let nonce = self.get_and_increment_nonce();
-        
+
         // Set minProfit to 80% of expected to account for slippage
         let min_profit = sim_result.net_profit * 80 / 100;
-        
+
         let gas_limit = sim_result.gas_estimate * 120 / 100; // 20% buffer
-        
+
+        // On Arbitrum, no priority fee needed (FIFO sequencer)
+        let priority_fee = U256::zero();
+
         let tx = self.simulator.build_transaction(
             opportunity,
             min_profit,
             gas_limit,
             gas_price,
-            self.max_priority_fee,
+            priority_fee,
             U256::from(nonce),
         );
-        
+
         // Step 5: Sign transaction
         let signature = self.wallet.sign_transaction(&tx).await?;
         let signed_tx = tx.rlp_signed(&signature);
-        
-        // Step 6: Submit
-        if self.use_flashbots {
-            self.submit_flashbots(client.clone(), &signed_tx, opportunity).await
-        } else {
-            self.submit_direct(client.clone(), &signed_tx, opportunity).await
-        }
+
+        // Step 6: Submit directly (Flashbots not available on Arbitrum)
+        // Arbitrum uses FIFO ordering, so direct submission is optimal
+        self.submit_direct(client.clone(), &signed_tx, opportunity).await
     }
     
+    /// Submit transaction directly to Arbitrum sequencer
+    /// Optimized for FIFO ordering - no priority fee bumping needed
     async fn submit_direct(
         &self,
         client: Arc<WsClient>,
         signed_tx: &Bytes,
         opportunity: &Opportunity,
     ) -> eyre::Result<ExecutionResult> {
+        // On Arbitrum, transactions are processed in FIFO order by the sequencer
+        // No need for priority fee optimization or replacement strategies
         let pending = client.send_raw_transaction(signed_tx.clone()).await?;
         let hash = pending.tx_hash();
-        
-        info!("📤 TX submitted: {:?}", hash);
-        
+
+        info!("📤 TX submitted to Arbitrum sequencer: {:?}", hash);
+
         // Track pending transaction
         {
             let mut pending_txs = self.pending_txs.write().await;
@@ -147,10 +154,10 @@ impl Executor {
                 hash,
                 opportunity: opportunity.clone(),
                 submitted_at: std::time::Instant::now(),
-                gas_price: U256::zero(), // Could track actual gas price
+                gas_price: U256::zero(),
             });
         }
-        
+
         Ok(ExecutionResult::Submitted { hash })
     }
     

@@ -16,11 +16,13 @@ from pathlib import Path
 app = Flask(__name__)
 CORS(app)
 
-# Configuration
+# Configuration - Arbitrum One
 CONFIG_PATH = Path(__file__).parent.parent / "bot" / "config.toml"
-RPC_URL = "https://eth-sepolia.g.alchemy.com/v2/u_ybzLz2H0iPFztCKrLN1"
+RPC_URL = "https://arb1.arbitrum.io/rpc"
+CHAIN_ID = 42161
+CHAIN_NAME = "Arbitrum One"
 WALLET_ADDRESS = "0x7d3aed887225446aa3c398a50ddbb62be12d918a"
-CONTRACT_ADDRESS = "0x7B2aEaCA74aBB5cD89B079AC2363cD98C78245e0"
+CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000000"  # Update after deployment
 
 # In-memory state (would be populated by actual bot)
 bot_state = {
@@ -163,8 +165,8 @@ def api_network():
     gas_price = get_gas_price()
     block = get_block_number()
     return jsonify({
-        "chain": "Sepolia Testnet",
-        "chain_id": 11155111,
+        "chain": CHAIN_NAME,
+        "chain_id": CHAIN_ID,
         "block_number": block,
         "gas_price_gwei": round(gas_price, 2),
         "rpc_status": bot_state["rpc_status"],
@@ -174,15 +176,15 @@ def api_network():
 @app.route("/api/trades")
 def api_trades():
     """Get recent trades"""
-    # Demo data for UI testing
+    # Demo data for UI testing - Arbitrum tokens
     demo_trades = [
         {
             "timestamp": "2024-01-15 14:32:01",
-            "token": "stETH",
+            "token": "wstETH",
             "buy_venue": "Curve",
             "sell_venue": "Uniswap",
-            "amount_eth": 5.0,
-            "profit_eth": 0.025,
+            "amount_eth": 0.5,
+            "profit_eth": 0.0025,
             "status": "confirmed",
             "tx_hash": "0xabc...123"
         },
@@ -191,18 +193,18 @@ def api_trades():
             "token": "weETH",
             "buy_venue": "Balancer",
             "sell_venue": "Uniswap",
-            "amount_eth": 8.0,
-            "profit_eth": 0.042,
+            "amount_eth": 0.3,
+            "profit_eth": 0.0018,
             "status": "confirmed",
             "tx_hash": "0xdef...456"
         },
         {
             "timestamp": "2024-01-15 14:25:12",
-            "token": "rETH",
+            "token": "ezETH",
             "buy_venue": "Uniswap",
-            "sell_venue": "Curve",
-            "amount_eth": 3.0,
-            "profit_eth": -0.008,
+            "sell_venue": "Balancer",
+            "amount_eth": 0.25,
+            "profit_eth": -0.0003,
             "status": "reverted",
             "tx_hash": "0xghi...789"
         },
@@ -213,10 +215,10 @@ def api_trades():
 @app.route("/api/opportunities")
 def api_opportunities():
     """Get current opportunities being monitored"""
-    # Demo data showing spread opportunities
+    # Demo data showing spread opportunities - Arbitrum tokens
     opportunities = [
         {
-            "token": "stETH",
+            "token": "wstETH",
             "curve_price": 0.9985,
             "uniswap_price": 1.0012,
             "balancer_price": 0.9998,
@@ -233,10 +235,10 @@ def api_opportunities():
         },
         {
             "token": "rETH",
-            "curve_price": 1.0892,
+            "curve_price": None,
             "uniswap_price": 1.0901,
             "balancer_price": 1.0895,
-            "best_spread_bps": 8,
+            "best_spread_bps": 6,
             "profitable": False
         },
         {
@@ -269,6 +271,7 @@ def api_stop():
 if __name__ == "__main__":
     print("\n" + "="*50)
     print("  LST/LRT Arbitrage Bot Dashboard")
+    print("  Network: Arbitrum One (Chain ID: 42161)")
     print("="*50)
     print(f"\n  Dashboard: http://localhost:5000")
     print(f"  Wallet:    {WALLET_ADDRESS[:10]}...{WALLET_ADDRESS[-8:]}")

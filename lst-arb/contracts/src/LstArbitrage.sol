@@ -16,7 +16,7 @@ contract LstArbitrage is IFlashLoanRecipient {
     // ============================================
     
     IBalancerVault public constant BALANCER = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
-    address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address public constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1; // Arbitrum WETH
     
     // Venue identifiers
     uint8 public constant VENUE_CURVE = 1;

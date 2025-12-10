@@ -1,10 +1,11 @@
 #!/bin/bash
 set -e
 
-# LST/LRT Arbitrage Contract Deployment Script
+# LST/LRT Arbitrage Contract Deployment Script - Arbitrum One
 
 echo "═══════════════════════════════════════════"
 echo "  LST/LRT Arbitrage Contract Deployment"
+echo "  Network: Arbitrum One (Chain ID: 42161)"
 echo "═══════════════════════════════════════════"
 
 # Check for required environment variables
@@ -13,8 +14,9 @@ if [ -z "$PRIVATE_KEY" ]; then
     exit 1
 fi
 
-if [ -z "$ETH_RPC_URL" ]; then
-    echo "Error: ETH_RPC_URL not set"
+if [ -z "$ARB_RPC_URL" ]; then
+    echo "Error: ARB_RPC_URL not set"
+    echo "Example: export ARB_RPC_URL=https://arb1.arbitrum.io/rpc"
     exit 1
 fi
 
@@ -27,12 +29,13 @@ forge install
 echo "Compiling contracts..."
 forge build --optimize --optimizer-runs 1000000
 
-echo "Deploying LstArbitrage contract..."
+echo "Deploying LstArbitrage contract to Arbitrum One..."
 DEPLOYED=$(forge create \
-    --rpc-url "$ETH_RPC_URL" \
+    --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY" \
     --verify \
-    --etherscan-api-key "${ETHERSCAN_API_KEY:-}" \
+    --verifier-url "https://api.arbiscan.io/api" \
+    --etherscan-api-key "${ARBISCAN_API_KEY:-}" \
     src/LstArbitrage.sol:LstArbitrage)
 
 # Extract contract address
@@ -46,47 +49,83 @@ echo "════════════════════════�
 # Configure venues
 echo "Configuring venues..."
 
-# Configure Curve stETH pool
+# Arbitrum token addresses
+WSTETH="0x5979D7b546E38E41137eFe97697CBca551Db098E"
+RETH="0xEC70Dcb4A1EfA46b8F2D97C310C9c4790bA5ffA8"
+CBETH="0x1DEBd73E752bEaF79865Fd6446b0c970EaE7732f"
+WEETH="0x35751007a407ca6feffe80b3cb397736d2cf4dbe"
+EZETH="0x2416092f143378750bb29b79ed961ab195cceea5"
+
+# Arbitrum venue addresses
+CURVE_WSTETH_POOL="0x6eB2dc694eB516B16Dc9d7671f465248B71E9091"
+CURVE_RETH_POOL="0x0000000000000000000000000000000000000000"  # Low liquidity - disabled
+
+# Configure Curve wstETH pool (wstETH/ETH NG Pool)
 cast send "$CONTRACT_ADDRESS" \
     "configureCurve(address,address)" \
-    "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84" \
-    "0xDC24316b9AE028F1497c275EB9192a3Ea0f67022" \
-    --rpc-url "$ETH_RPC_URL" \
+    "$WSTETH" \
+    "$CURVE_WSTETH_POOL" \
+    --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
-echo "  ✓ Curve stETH pool configured"
+echo "  ✓ Curve wstETH/ETH pool configured"
 
-# Configure Uniswap V3 for stETH (0.05% fee tier)
+# Skip Curve rETH pool configuration if pool address is zero
+if [ "$CURVE_RETH_POOL" != "0x0000000000000000000000000000000000000000" ]; then
+    cast send "$CONTRACT_ADDRESS" \
+        "configureCurve(address,address)" \
+        "$RETH" \
+        "$CURVE_RETH_POOL" \
+        --rpc-url "$ARB_RPC_URL" \
+        --private-key "$PRIVATE_KEY"
+    echo "  ✓ Curve rETH pool configured"
+else
+    echo "  ⚠ Curve rETH pool skipped (low liquidity on Arbitrum)"
+fi
+
+# Configure Uniswap V3 for wstETH (0.05% fee tier)
+# Placeholder pool - update with actual Arbitrum pool address
 cast send "$CONTRACT_ADDRESS" \
     "configureUniswapV3(address,address,uint24)" \
-    "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84" \
-    "0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4" \
+    "$WSTETH" \
+    "0x35218a1cbaC5Bbc3E57fd9Bd38219D37571b3537" \
     "500" \
-    --rpc-url "$ETH_RPC_URL" \
+    --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
-echo "  ✓ Uniswap V3 stETH pool configured"
+echo "  ✓ Uniswap V3 wstETH pool configured"
 
 # Configure Balancer wstETH pool
 cast send "$CONTRACT_ADDRESS" \
     "configureBalancer(address,bytes32)" \
-    "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" \
-    "0x32296969ef14eb0c6d29669c550d4a0449130230000200000000000000000080" \
-    --rpc-url "$ETH_RPC_URL" \
+    "$WSTETH" \
+    "0x9791d590788598535278552eecd4b211bfc790cb000000000000000000000498" \
+    --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
 echo "  ✓ Balancer wstETH pool configured"
 
-# Configure weETH (EtherFi LRT)
+# Configure weETH on Uniswap V3 (500 fee tier - placeholder, update with actual pool)
 cast send "$CONTRACT_ADDRESS" \
     "configureUniswapV3(address,address,uint24)" \
-    "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee" \
-    "0x7A415B19932c0105c82FDB6b720bb01B0CC2CAe3" \
+    "$WEETH" \
+    "0x0000000000000000000000000000000000000000" \
     "500" \
-    --rpc-url "$ETH_RPC_URL" \
+    --rpc-url "$ARB_RPC_URL" \
     --private-key "$PRIVATE_KEY"
 
-echo "  ✓ Uniswap V3 weETH pool configured"
+echo "  ✓ Uniswap V3 weETH pool configured (placeholder - update with actual pool)"
+
+# Configure ezETH on Uniswap V3 (500 fee tier - placeholder, update with actual pool)
+cast send "$CONTRACT_ADDRESS" \
+    "configureUniswapV3(address,address,uint24)" \
+    "$EZETH" \
+    "0x0000000000000000000000000000000000000000" \
+    "500" \
+    --rpc-url "$ARB_RPC_URL" \
+    --private-key "$PRIVATE_KEY"
+
+echo "  ✓ Uniswap V3 ezETH pool configured (placeholder - update with actual pool)"
 
 echo ""
 echo "═══════════════════════════════════════════"
@@ -94,9 +133,13 @@ echo "  DEPLOYMENT COMPLETE!"
 echo "═══════════════════════════════════════════"
 echo ""
 echo "Contract Address: $CONTRACT_ADDRESS"
+echo "Network: Arbitrum One (42161)"
 echo ""
 echo "Next steps:"
 echo "1. Update ARB_CONTRACT in your .env file"
-echo "2. Fund contract with gas (send ETH)"
-echo "3. Start the bot: cargo run --release"
+echo "2. Fund contract with gas (send ETH on Arbitrum)"
+echo "3. Update Uniswap pool addresses for weETH/ezETH"
+echo "4. Start the bot: cargo run --release"
+echo ""
+echo "View on Arbiscan: https://arbiscan.io/address/$CONTRACT_ADDRESS"
 echo ""
