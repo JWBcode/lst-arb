@@ -105,9 +105,9 @@ impl Default for Config {
                 ezeth: "0x2416092f143378750bb29b79ed961ab195cceea5".into(),
             },
             venues: VenueConfig {
-                // Arbitrum venue addresses
+                // Arbitrum Curve pool addresses
                 curve_steth_pool: "0x6eB2dc694eB516B16Dc9d7671f465248B71E9091".into(), // wstETH/ETH NG Pool
-                curve_reth_pool: "0x0000000000000000000000000000000000000000".into(), // Low liquidity on Arb
+                curve_reth_pool: "0x30DF229cefa463e991e29D42DB0bae4e126f2aa9".into(),  // rETH/ETH Pool
                 balancer_vault: "0xBA12222222228d8Ba445958a75a0704d566BF2C8".into(),
                 uniswap_quoter: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e".into(),
                 uniswap_router: "0xE592427A0AEce92De3Edee1F18E0157C05861564".into(),
